@@ -184,7 +184,9 @@ def run(xlsx_path=None, db_path=None, media_dir=None, verbose=True, wipe_runtime
         sheet = conn.execute(
             "SELECT variant_id, topic, card_number, card_name, media_key FROM variants "
             "ORDER BY variant_id").fetchall()
-        with open(os.path.join(config.BASE_DIR, "content", "import_report.txt"), "w",
+        report_dir = os.path.join(config.BASE_DIR, "content")
+        os.makedirs(report_dir, exist_ok=True)  # dir is gitignored -> absent on fresh deploy
+        with open(os.path.join(report_dir, "import_report.txt"), "w",
                   encoding="utf-8") as f:
             for r in sheet:
                 f.write(f"{r['variant_id']:>2} | {r['topic']:<18} | {r['card_number']:>4}. "

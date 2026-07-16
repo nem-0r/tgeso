@@ -106,6 +106,32 @@ def _terminate(conn, client_id, state, now):
                      (state, now, client_id))
 
 
+def owner_reply_is_own_send(conn, client_id, msg_id):
+    """True if msg_id is a message THIS bot already sent on the owner's behalf.
+    Lets the caller tell the bot's own on-behalf send (which Telegram may echo back
+    as a business_message from the owner) apart from the owner genuinely typing herself,
+    so auto-pause never fires on the bot's own messages."""
+    if msg_id is None:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM sent_log WHERE client_id=? AND tg_message_id=?",
+        (client_id, msg_id)).fetchone() is not None
+
+
+def owner_took_over(conn, client_id, now):
+    """The account owner wrote in this chat herself -> a human took the conversation.
+    Cancel the pending drip and mark HANDOFF so the bot stops auto-sending here.
+    No-op if the chat is not an active funnel client (e.g. her ordinary contacts)."""
+    c = get_client(conn, client_id)
+    if c is None or c["state"] in config.TERMINAL_STATES:
+        return False
+    with transaction(conn):
+        cancel_pending(conn, client_id, c["run_id"])
+        conn.execute("UPDATE clients SET state='HANDOFF', version=version+1, updated_at=? "
+                     "WHERE client_id=?", (now, client_id))
+    return True
+
+
 def handle_incoming(conn, client_id, text, now, bcid=None, msg_id=None, rng=None):
     """Classify + mutate. Returns {'action': ...}. Network side effects (operator
     alert, read receipt) are left to the async caller based on the returned action."""

@@ -63,15 +63,23 @@ async def _run_live():
 
     @dp.business_message()
     async def on_message(msg: Message):
-        owner_id = await _owner_of(msg.business_connection_id)
-        if owner_id is not None and msg.from_user and msg.from_user.id == owner_id:
-            return  # ignore the OWNER's own outgoing messages (never self-trigger)
+        if msg.from_user is None:
+            return  # #3: a message with no sender is never a funnel client
         now = int(time.time())
+        owner_id = await _owner_of(msg.business_connection_id)
+        if owner_id is not None and msg.from_user.id == owner_id:
+            # #1: the owner typed in a client chat herself -> a human took over; pause our
+            # drip there. Skip the bot's OWN on-behalf sends (echoed back) via sent_log id.
+            if not funnel.owner_reply_is_own_send(conn, msg.chat.id, msg.message_id):
+                funnel.owner_took_over(conn, msg.chat.id, now)
+            return
         text = msg.text or msg.caption or ""
         res = funnel.handle_incoming(
             conn, msg.from_user.id, text, now,
             bcid=msg.business_connection_id, msg_id=msg.message_id)
-        await transport.mark_read(msg.chat.id, msg.message_id, msg.business_connection_id)
+        # #2: only mark read for a known funnel client (never auto-read her ordinary contacts)
+        if funnel.get_client(conn, msg.from_user.id) is not None:
+            await transport.mark_read(msg.chat.id, msg.message_id, msg.business_connection_id)
         if res["action"] == "handoff":
             await transport.notify_operator(
                 f"🔥 Горячий лид {msg.from_user.id} ({res.get('name')}) написал: {text[:80]}")

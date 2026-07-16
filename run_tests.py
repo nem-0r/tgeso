@@ -172,6 +172,33 @@ def test_confirm_toctou():
     conn.close()
 
 
+def test_owner_takeover():
+    print("\n== owner manual reply -> auto-pause drip (#1) + own-send echo guard ==")
+    conn = dbm.connect()
+    with dbm.transaction(conn):
+        dbm.wipe(conn, dbm.RUNTIME_TABLES)
+    cid = 121212
+    funnel.start_or_reset(conn, cid, "SIM", now=1000)   # active drip: greeting pending
+    pend_before = conn.execute("SELECT COUNT(*) AS c FROM steps WHERE client_id=? AND status='pending'",
+                               (cid,)).fetchone()["c"]
+    check("drip scheduled before takeover", pend_before >= 1, f"pending={pend_before}")
+    took = funnel.owner_took_over(conn, cid, now=1005)   # owner types in this chat herself
+    check("owner_took_over reports handled", took is True)
+    check("state HANDOFF after takeover", funnel.get_client(conn, cid)["state"] == "HANDOFF")
+    pend_after = conn.execute("SELECT COUNT(*) AS c FROM steps WHERE client_id=? AND status='pending'",
+                              (cid,)).fetchone()["c"]
+    check("pending drip cancelled", pend_after == 0, f"pending={pend_after}")
+    check("no-op for her ordinary contact", funnel.owner_took_over(conn, 999999, now=1006) is False)
+    check("no-op when already terminal", funnel.owner_took_over(conn, cid, now=1007) is False)
+    # echo guard: a message id the bot itself sent must NOT be treated as a manual reply
+    conn.execute("INSERT INTO sent_log(client_id, run_id, step_name, tg_message_id, sent_at) "
+                 "VALUES (?,?,?,?,?)", (cid, 1, "greeting", 55501, 1000))
+    check("own send recognised (id in sent_log)", funnel.owner_reply_is_own_send(conn, cid, 55501) is True)
+    check("foreign id -> genuine manual reply", funnel.owner_reply_is_own_send(conn, cid, 999) is False)
+    check("None id -> not own send", funnel.owner_reply_is_own_send(conn, cid, None) is False)
+    conn.close()
+
+
 async def main():
     await test_sequence_and_media()
     await test_timings()
@@ -181,6 +208,7 @@ async def main():
     await test_early_answer_refine()
     await test_post_cta_handoff()
     test_confirm_toctou()
+    test_owner_takeover()
     test_distribution()
     await test_idempotency()
     print("\n" + "=" * 50)

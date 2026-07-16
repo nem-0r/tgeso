@@ -90,8 +90,9 @@ async def _run_live():
         res = funnel.handle_incoming(
             conn, msg.from_user.id, text, now,
             bcid=msg.business_connection_id, msg_id=msg.message_id)
-        # #2: only mark read for a known funnel client (never auto-read her ordinary contacts)
-        if funnel.get_client(conn, msg.from_user.id) is not None:
+        # #2: mark read ONLY during an active funnel — never her ordinary contacts, and
+        # never after handoff/stop (leave those UNREAD so she notices and reads them herself)
+        if funnel.should_mark_read(conn, msg.from_user.id):
             await transport.mark_read(msg.chat.id, msg.message_id, msg.business_connection_id)
         if res["action"] == "handoff":
             nm = html.escape(res.get("name") or "клиент")

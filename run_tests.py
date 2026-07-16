@@ -199,6 +199,21 @@ def test_owner_takeover():
     conn.close()
 
 
+def test_mark_read_gating():
+    print("\n== mark_read gating (#2b): active funnel yes; stranger / after handoff no ==")
+    conn = dbm.connect()
+    with dbm.transaction(conn):
+        dbm.wipe(conn, dbm.RUNTIME_TABLES)
+    check("stranger (no client row) -> NOT read", funnel.should_mark_read(conn, 12321) is False)
+    funnel.start_or_reset(conn, 555, "SIM", now=1000)          # active funnel (TRIGGERED)
+    check("active funnel client -> read (looks responsive)", funnel.should_mark_read(conn, 555) is True)
+    funnel._terminate(conn, 555, "HANDOFF", 1001)              # hot lead handed to human
+    check("after handoff -> NOT read (gadalka reads herself)", funnel.should_mark_read(conn, 555) is False)
+    funnel._terminate(conn, 555, "STOPPED", 1002)
+    check("after stop -> NOT read", funnel.should_mark_read(conn, 555) is False)
+    conn.close()
+
+
 def test_daily_report():
     print("\n== daily digest: closed-day window (gap-free), metrics, conversion, events ==")
     import calendar
@@ -274,6 +289,7 @@ async def main():
     await test_post_cta_handoff()
     test_confirm_toctou()
     test_owner_takeover()
+    test_mark_read_gating()
     test_daily_report()
     test_distribution()
     await test_idempotency()

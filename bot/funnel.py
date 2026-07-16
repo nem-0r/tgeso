@@ -18,6 +18,14 @@ def get_client(conn, client_id):
     return conn.execute("SELECT * FROM clients WHERE client_id = ?", (client_id,)).fetchone()
 
 
+def should_mark_read(conn, client_id):
+    """Mark an inbound message read ONLY while the client is in an active funnel.
+    After a terminal state (HANDOFF/STOPPED/...) the bot stops touching the chat, so
+    messages stay UNREAD and the human operator sees the unread badge and reads herself."""
+    c = get_client(conn, client_id)
+    return c is not None and c["state"] not in config.TERMINAL_STATES
+
+
 def touch_incoming(conn, client_id, bcid, now):
     # NB: must NOT touch updated_at — the re-trigger cooldown reads it.
     # A fresh bcid (Telegram rotates it on reconnect) wins over the stored one.

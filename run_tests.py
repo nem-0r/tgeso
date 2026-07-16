@@ -199,6 +199,60 @@ def test_owner_takeover():
     conn.close()
 
 
+def test_daily_report():
+    print("\n== daily report: events log, MSK day window, metrics, conversion, clickable ==")
+    import calendar
+    from bot import report
+    conn = dbm.connect()
+    dbm.init(conn)                                   # ensure new events/meta tables exist
+    with dbm.transaction(conn):
+        dbm.wipe(conn, dbm.RUNTIME_TABLES)
+    now = calendar.timegm((2026, 7, 16, 18, 0, 0, 0, 0, 0))   # 18:00 UTC = 21:00 MSK
+    start, end = report.day_window(now)
+    check("now is inside its own MSK day window", start <= now < end)
+    check("MSK day window is exactly 24h", end - start == 86400)
+    date_str, hour = report.local_parts(now)
+    check("local date/hour = 2026-07-16 21:00 MSK", date_str == "2026-07-16" and hour == 21, f"{date_str} {hour}")
+    # should_send: fires at 21:00 if not sent; not twice; not before 21:00
+    fire, today = report.should_send(now, None)
+    check("fires at 21:00 when not sent today", fire and today == "2026-07-16")
+    check("does NOT fire again same day", not report.should_send(now, "2026-07-16")[0])
+    check("does NOT fire at 20:00 MSK", not report.should_send(now - 3600, None)[0])
+
+    def ev(e, cid, ts):
+        conn.execute("INSERT INTO events(ts,event,client_id,run_id) VALUES (?,?,?,1)", (ts, e, cid))
+    def diag(cid, ts):
+        conn.execute("INSERT INTO sent_log(client_id,run_id,step_name,tg_message_id,sent_at) "
+                     "VALUES (?,1,'diagnosis',?,?)", (cid, cid, ts))
+    def cli(cid, name):
+        conn.execute("INSERT OR REPLACE INTO clients(client_id,state,run_id,name,created_at,updated_at) "
+                     "VALUES (?,'HANDOFF',1,?,0,0)", (cid, name))
+    ev("triggered", 1, now - 100); ev("triggered", 2, now - 200); ev("triggered", 3, now - 300)
+    ev("triggered", 9, start - 50)                   # previous day -> must be excluded
+    diag(1, now - 90); diag(2, now - 190)            # 2 readings in window
+    cli(501, "Аня"); cli(502, "Боря")
+    ev("hot_lead", 501, now - 60); ev("hot_lead", 502, now - 50)
+    m = report.collect(conn, now)
+    check("triggered counted (window only)", m["triggered"] == 3, str(m["triggered"]))
+    check("readings from sent_log diagnosis", m["readings"] == 2, str(m["readings"]))
+    check("hot leads counted", len(m["hot"]) == 2, str(m["hot"]))
+    out = report.render(m)
+    check("conversion 67% (2/3)", "67%" in out, out)
+    check("clickable lead link present", 'tg://user?id=501' in out and "Аня" in out)
+    # event logging integration: start -> 'triggered', handoff -> 'hot_lead'
+    with dbm.transaction(conn):
+        dbm.wipe(conn, dbm.RUNTIME_TABLES)
+    funnel.start_or_reset(conn, 4242, "SIM", now=now)
+    got = [r["event"] for r in conn.execute("SELECT event FROM events WHERE client_id=4242")]
+    check("start_or_reset logs 'triggered'", got == ["triggered"], str(got))
+    conn.execute("UPDATE clients SET state='CTA_SENT' WHERE client_id=4242")
+    r = funnel.handle_incoming(conn, 4242, "да хочу расклад", now + 1, bcid="SIM")
+    check("post-CTA reply -> handoff", r["action"] == "handoff")
+    hl = conn.execute("SELECT COUNT(*) c FROM events WHERE client_id=4242 AND event='hot_lead'").fetchone()["c"]
+    check("handoff logs 'hot_lead' exactly once", hl == 1, str(hl))
+    conn.close()
+
+
 async def main():
     await test_sequence_and_media()
     await test_timings()
@@ -209,6 +263,7 @@ async def main():
     await test_post_cta_handoff()
     test_confirm_toctou()
     test_owner_takeover()
+    test_daily_report()
     test_distribution()
     await test_idempotency()
     print("\n" + "=" * 50)

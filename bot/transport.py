@@ -22,7 +22,7 @@ class Transport:
     async def mark_read(self, chat_id, message_id, business_connection_id=None):
         return None
 
-    async def notify_operator(self, text):
+    async def notify_operator(self, text, html=False):
         return None
 
 
@@ -71,7 +71,7 @@ class SimulatedTransport(Transport):
         self.events.append({"t": self._t(), "chat_id": chat_id,
                             "kind": "read", "content": message_id})
 
-    async def notify_operator(self, text):
+    async def notify_operator(self, text, html=False):
         self.events.append({"t": self._t(), "chat_id": "OPERATOR",
                             "kind": "alert", "content": text})
 

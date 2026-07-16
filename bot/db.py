@@ -91,10 +91,36 @@ CREATE TABLE IF NOT EXISTS business_connections (
     is_enabled    INTEGER,
     connected_at  INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS events (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        INTEGER NOT NULL,          -- epoch UTC of the event
+    event     TEXT NOT NULL,             -- 'triggered' | 'hot_lead'
+    client_id INTEGER,
+    run_id    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts, event);
 """
 
 CONTENT_TABLES = ["variants", "media", "templates", "bag", "bag_cursor"]
-RUNTIME_TABLES = ["clients", "steps", "sent_log", "business_connections"]
+RUNTIME_TABLES = ["clients", "steps", "sent_log", "business_connections", "events"]
+
+
+def log_event(conn, event, client_id, run_id, ts):
+    """Append an analytics event. Call inside the caller's transaction so it is atomic
+    with the state change it records (append-only, no constraints -> never conflicts)."""
+    conn.execute("INSERT INTO events(ts, event, client_id, run_id) VALUES (?, ?, ?, ?)",
+                 (ts, event, client_id, run_id))
+
+
+def meta_get(conn, key, default=None):
+    r = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return r["value"] if r else default
+
+
+def meta_set(conn, key, value):
+    conn.execute("INSERT INTO meta(key, value) VALUES (?, ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, str(value)))
 
 
 def connect(path=None) -> sqlite3.Connection:

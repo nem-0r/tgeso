@@ -22,7 +22,12 @@ CODE_WORD = os.environ.get("TAROT_CODE_WORD", "ТАРО")
 
 # --- Telegram (STUB until provided) ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")               # None => simulation only
-OPERATOR_CHAT_ID = os.environ.get("OPERATOR_CHAT_ID")  # where hot-lead alerts go
+OPERATOR_CHAT_ID = os.environ.get("OPERATOR_CHAT_ID")  # operator id: hot-lead alerts + daily report + report button
+
+# --- daily digest to the operator ---
+REPORT_HOUR = int(os.environ.get("REPORT_HOUR", "21"))               # local hour to auto-send the digest
+REPORT_TZ_OFFSET_HOURS = int(os.environ.get("REPORT_TZ_OFFSET", "3"))  # Moscow = UTC+3, no DST
+REPORT_BUTTON = "📊 Отчёт за сегодня"                                  # on-demand report button label
 
 # --- funnel timing (seconds) — STRICTLY per воронка, each relative to previous step ---
 # (step_name, delay_from_previous_step_seconds, kind)

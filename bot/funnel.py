@@ -10,7 +10,7 @@ The timed chain itself is driven by the scheduler; this module only schedules
 the FIRST step (greeting at +7 min) on trigger.
 """
 from . import config, content
-from .db import transaction
+from .db import transaction, log_event
 from .variants import draw_variant
 
 
@@ -46,6 +46,7 @@ def start_or_reset(conn, client_id, bcid, now, rng=None):
                 "VALUES (?, ?, 'TRIGGERED', ?, 1, ?, ?, ?, ?)",
                 (client_id, bcid, vid, now, now, now, now))
             _schedule_first(conn, client_id, 1, now)
+            log_event(conn, "triggered", client_id, 1, now)
         return "triggered"
 
     if (c["state"] in config.TERMINAL_STATES or c["state"] == "CTA_SENT") \
@@ -62,6 +63,7 @@ def start_or_reset(conn, client_id, bcid, now, rng=None):
                 "updated_at=? WHERE client_id=?",
                 (vid, new_run, now, now, now, client_id))
             _schedule_first(conn, client_id, new_run, now)
+            log_event(conn, "triggered", client_id, new_run, now)
         return "re-triggered"
 
     return "ignored"  # already in an active funnel, or cooldown not elapsed
@@ -96,7 +98,7 @@ def cancel_pending(conn, client_id, run_id):
                  (client_id, run_id))
 
 
-def _terminate(conn, client_id, state, now):
+def _terminate(conn, client_id, state, now, event=None):
     c = get_client(conn, client_id)
     if c is None:
         return
@@ -104,6 +106,8 @@ def _terminate(conn, client_id, state, now):
         cancel_pending(conn, client_id, c["run_id"])
         conn.execute("UPDATE clients SET state=?, version=version+1, updated_at=? WHERE client_id=?",
                      (state, now, client_id))
+        if event:
+            log_event(conn, event, client_id, c["run_id"], now)
 
 
 def owner_reply_is_own_send(conn, client_id, msg_id):
@@ -154,7 +158,7 @@ def handle_incoming(conn, client_id, text, now, bcid=None, msg_id=None, rng=None
     if c and c["state"] not in config.TERMINAL_STATES and c["state"] != "NEW":
         # after the CTA, ANY reply is a hot lead; buy-intent at any active step -> handoff
         if c["state"] == "CTA_SENT" or content.has_intent(text):
-            _terminate(conn, client_id, "HANDOFF", now)
+            _terminate(conn, client_id, "HANDOFF", now, event="hot_lead")
             return {"action": "handoff", "client_id": client_id, "name": c["name"]}
         if is_cw:
             return {"action": "ignored"}   # active client just repeated the code word

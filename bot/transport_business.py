@@ -41,9 +41,11 @@ class BusinessTransport(Transport):
         except Exception:
             pass
 
-    async def notify_operator(self, text):
+    async def notify_operator(self, text, html=False):
         if config.OPERATOR_CHAT_ID:
             try:
-                await self.bot.send_message(int(config.OPERATOR_CHAT_ID), text)
+                await self.bot.send_message(
+                    int(config.OPERATOR_CHAT_ID), text,
+                    parse_mode="HTML" if html else None)
             except Exception:
                 pass

@@ -1,0 +1,5 @@
+# Import (parsing the xlsx) — required for run_import.py
+openpyxl>=3.1
+
+# Live Telegram Business transport — required only to go online (run_simulate/run_tests don't need it)
+aiogram>=3.29

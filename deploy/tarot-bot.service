@@ -1,0 +1,18 @@
+[Unit]
+Description=Tarot Business Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tarot-bot
+EnvironmentFile=/opt/tarot-bot/.env
+ExecStart=/opt/tarot-bot/.venv/bin/python -m bot.app
+Restart=always
+RestartSec=5
+User=tarot
+Group=tarot
+# один экземпляр процесса = одна сессия getUpdates (важно: не запускать второй)
+
+[Install]
+WantedBy=multi-user.target

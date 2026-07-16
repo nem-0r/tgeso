@@ -1,8 +1,9 @@
-"""Daily digest for the operator — analytics over the events log + sent_log.
+"""Operator digest — analytics over the events log + sent_log.
 
-Pure, testable helpers for the operator-local day window and the once-a-day fire
-decision, plus HTML rendering with clickable client links. Moscow is UTC+3 with NO
-DST, so a fixed offset is correct year-round (no timezone library needed).
+Production pattern: the SCHEDULED digest reports a CLOSED period (the full previous
+local day), so numbers are final and no time is ever dropped. The on-demand button
+shows "today so far" (the in-progress day). Moscow is UTC+3 with NO DST, so a fixed
+offset is correct year-round (no timezone library needed).
 """
 import html
 import time
@@ -21,7 +22,7 @@ def local_parts(now):
 
 
 def day_window(now):
-    """[start, end) epoch UTC covering the LOCAL day that `now` falls in."""
+    """[start, end) epoch UTC of the LOCAL day containing `now` (today)."""
     off = _offset_seconds()
     shifted = now + off
     local_midnight = shifted - (shifted % 86400)   # 00:00 local, in the shifted frame
@@ -29,15 +30,25 @@ def day_window(now):
     return start, start + 86400
 
 
+def prev_day_window(now):
+    """[start, end) epoch UTC of the FULL previous local day (yesterday)."""
+    today_start, _ = day_window(now)
+    return today_start - 86400, today_start
+
+
 def should_send(now, last_date):
-    """(bool, today_str): fire when it's >= REPORT_HOUR local AND not sent today yet."""
+    """(bool, today_str): fire once when it's >= REPORT_HOUR local AND not sent today."""
     date_str, hour = local_parts(now)
     return (hour >= config.REPORT_HOUR and date_str != last_date), date_str
 
 
-def collect(conn, now):
-    """Metrics for the local day containing `now`."""
-    start, end = day_window(now)
+def _date_label(epoch):
+    """DD.MM.YYYY for the local day containing `epoch`."""
+    return time.strftime("%d.%m.%Y", time.gmtime(epoch + _offset_seconds()))
+
+
+def collect(conn, start, end):
+    """Metrics for the [start, end) epoch window."""
     triggered = conn.execute(
         "SELECT COUNT(*) AS c FROM events WHERE event='triggered' AND ts>=? AND ts<?",
         (start, end)).fetchone()["c"]
@@ -49,8 +60,7 @@ def collect(conn, now):
         "LEFT JOIN clients c ON c.client_id = e.client_id "
         "WHERE e.event='hot_lead' AND e.ts>=? AND e.ts<? ORDER BY e.ts",
         (start, end)).fetchall()
-    date_str, _ = local_parts(now)
-    return {"date": date_str, "triggered": triggered, "readings": readings,
+    return {"triggered": triggered, "readings": readings,
             "hot": [(r["cid"], r["name"]) for r in hot_rows]}
 
 
@@ -59,13 +69,12 @@ def _lead_link(cid, name):
     return f'• <a href="tg://user?id={int(cid)}">{label}</a>'
 
 
-def render(metrics):
-    """HTML digest message from a metrics dict."""
+def render(metrics, title):
+    """HTML digest message from a metrics dict + a title line."""
     t, r, hot = metrics["triggered"], metrics["readings"], metrics["hot"]
     conv = round(len(hot) / t * 100) if t else 0
-    dd = ".".join(reversed(metrics["date"].split("-")))   # YYYY-MM-DD -> DD.MM.YYYY
     lines = [
-        f"📊 <b>Итоги за {dd}</b> (МСК)",
+        f"📊 <b>{title}</b> (МСК)",
         "",
         f"Написали ТАРО:      <b>{t}</b>",
         f"Дошли до разбора:   <b>{r}</b>",
@@ -75,9 +84,17 @@ def render(metrics):
         lines += ["", "Горячие лиды (тап — открыть чат):"]
         lines += [_lead_link(cid, name) for cid, name in hot]
     else:
-        lines += ["", "Горячих лидов сегодня пока нет."]
+        lines += ["", "Горячих лидов не было."]
     return "\n".join(lines)
 
 
-def build_report(conn, now):
-    return render(collect(conn, now))
+def build_report(conn, now, scope="today"):
+    """scope='yesterday' -> closed previous day (scheduled digest);
+       scope='today'     -> in-progress current day (on-demand button)."""
+    if scope == "yesterday":
+        start, end = prev_day_window(now)
+        title = f"Итоги за {_date_label(start)}"
+    else:
+        start, end = day_window(now)
+        title = f"Итоги за сегодня ({_date_label(start)}, день идёт)"
+    return render(collect(conn, start, end), title)

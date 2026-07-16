@@ -37,8 +37,8 @@ async def _run_live():
     def _is_operator(uid):
         return bool(config.OPERATOR_CHAT_ID) and str(uid) == str(config.OPERATOR_CHAT_ID)
 
-    async def _send_report(chat_id):
-        await bot.send_message(chat_id, report.build_report(conn, int(time.time())),
+    async def _send_report(chat_id):   # on-demand button -> today so far
+        await bot.send_message(chat_id, report.build_report(conn, int(time.time()), scope="today"),
                                parse_mode="HTML", reply_markup=kb)
 
     def _remember_owner(bcid, owner_id, can_reply=True, enabled=True):
@@ -126,9 +126,9 @@ async def _run_live():
             dbm.meta_set(conn, "last_report_date", today)   # mark first -> never double-send
         if config.OPERATOR_CHAT_ID:
             await bot.send_message(int(config.OPERATOR_CHAT_ID),
-                                   report.build_report(conn, now),
+                                   report.build_report(conn, now, scope="yesterday"),
                                    parse_mode="HTML", reply_markup=kb)
-            print(f"[daily report] sent for {today}")
+            print(f"[daily report] sent on {today} (covers previous day)")
 
     async def poller():
         while True:

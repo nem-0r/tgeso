@@ -200,24 +200,25 @@ def test_owner_takeover():
 
 
 def test_daily_report():
-    print("\n== daily report: events log, MSK day window, metrics, conversion, clickable ==")
+    print("\n== daily digest: closed-day window (gap-free), metrics, conversion, events ==")
     import calendar
     from bot import report
     conn = dbm.connect()
     dbm.init(conn)                                   # ensure new events/meta tables exist
     with dbm.transaction(conn):
         dbm.wipe(conn, dbm.RUNTIME_TABLES)
-    now = calendar.timegm((2026, 7, 16, 18, 0, 0, 0, 0, 0))   # 18:00 UTC = 21:00 MSK
-    start, end = report.day_window(now)
-    check("now is inside its own MSK day window", start <= now < end)
-    check("MSK day window is exactly 24h", end - start == 86400)
+    now = calendar.timegm((2026, 7, 16, 7, 0, 0, 0, 0, 0))    # 07:00 UTC = 10:00 MSK
+    today_s, today_e = report.day_window(now)
+    y_s, y_e = report.prev_day_window(now)
+    check("today window is 24h", today_e - today_s == 86400)
+    check("yesterday window is 24h", y_e - y_s == 86400)
+    check("windows contiguous — no gap, no overlap", y_e == today_s, f"{y_e} vs {today_s}")
+    check("now inside today window", today_s <= now < today_e)
     date_str, hour = report.local_parts(now)
-    check("local date/hour = 2026-07-16 21:00 MSK", date_str == "2026-07-16" and hour == 21, f"{date_str} {hour}")
-    # should_send: fires at 21:00 if not sent; not twice; not before 21:00
-    fire, today = report.should_send(now, None)
-    check("fires at 21:00 when not sent today", fire and today == "2026-07-16")
+    check("local time = 2026-07-16 10:00 MSK", date_str == "2026-07-16" and hour == 10, f"{date_str} {hour}")
+    check("fires at 10:00 (>=REPORT_HOUR) when unsent", report.should_send(now, None)[0])
     check("does NOT fire again same day", not report.should_send(now, "2026-07-16")[0])
-    check("does NOT fire at 20:00 MSK", not report.should_send(now - 3600, None)[0])
+    check("does NOT fire at 09:00 MSK", not report.should_send(now - 3600, None)[0])
 
     def ev(e, cid, ts):
         conn.execute("INSERT INTO events(ts,event,client_id,run_id) VALUES (?,?,?,1)", (ts, e, cid))
@@ -227,18 +228,28 @@ def test_daily_report():
     def cli(cid, name):
         conn.execute("INSERT OR REPLACE INTO clients(client_id,state,run_id,name,created_at,updated_at) "
                      "VALUES (?,'HANDOFF',1,?,0,0)", (cid, name))
-    ev("triggered", 1, now - 100); ev("triggered", 2, now - 200); ev("triggered", 3, now - 300)
-    ev("triggered", 9, start - 50)                   # previous day -> must be excluded
-    diag(1, now - 90); diag(2, now - 190)            # 2 readings in window
-    cli(501, "Аня"); cli(502, "Боря")
-    ev("hot_lead", 501, now - 60); ev("hot_lead", 502, now - 50)
-    m = report.collect(conn, now)
-    check("triggered counted (window only)", m["triggered"] == 3, str(m["triggered"]))
-    check("readings from sent_log diagnosis", m["readings"] == 2, str(m["readings"]))
-    check("hot leads counted", len(m["hot"]) == 2, str(m["hot"]))
-    out = report.render(m)
-    check("conversion 67% (2/3)", "67%" in out, out)
-    check("clickable lead link present", 'tg://user?id=501' in out and "Аня" in out)
+    cli(501, "Аня"); cli(502, "Боря"); cli(601, "Витя")
+    # YESTERDAY (incl. an evening lead near end-of-day -> must NOT dissolve)
+    ev("triggered", 1, y_s + 100); ev("triggered", 2, y_s + 200); ev("triggered", 3, y_e - 60)
+    diag(1, y_s + 300); diag(2, y_e - 30)
+    ev("hot_lead", 501, y_s + 400); ev("hot_lead", 502, y_e - 20)   # 23:59-ish lead
+    # TODAY (in-progress) -> must NOT appear in yesterday's report
+    ev("triggered", 4, now - 60); ev("hot_lead", 601, now - 30)
+
+    ym = report.collect(conn, y_s, y_e)
+    check("yesterday: 3 triggered (evening incl.)", ym["triggered"] == 3, str(ym["triggered"]))
+    check("yesterday: 2 readings", ym["readings"] == 2, str(ym["readings"]))
+    check("yesterday: 2 hot (evening lead NOT dissolved)", len(ym["hot"]) == 2, str(ym["hot"]))
+    out = report.build_report(conn, now, scope="yesterday")
+    check("digest titled by CLOSED prev day 15.07.2026", "15.07.2026" in out, out.splitlines()[0])
+    check("yesterday conversion 67%", "67%" in out)
+    check("lead clickable", 'tg://user?id=501' in out and "Аня" in out)
+    check("today's lead NOT in yesterday digest", "Витя" not in out)
+
+    out2 = report.build_report(conn, now, scope="today")
+    check("today button says 'день идёт'", "день идёт" in out2)
+    check("today shows today's lead, not yesterday's", "Витя" in out2 and "Аня" not in out2)
+
     # event logging integration: start -> 'triggered', handoff -> 'hot_lead'
     with dbm.transaction(conn):
         dbm.wipe(conn, dbm.RUNTIME_TABLES)
@@ -249,7 +260,7 @@ def test_daily_report():
     r = funnel.handle_incoming(conn, 4242, "да хочу расклад", now + 1, bcid="SIM")
     check("post-CTA reply -> handoff", r["action"] == "handoff")
     hl = conn.execute("SELECT COUNT(*) c FROM events WHERE client_id=4242 AND event='hot_lead'").fetchone()["c"]
-    check("handoff logs 'hot_lead' exactly once", hl == 1, str(hl))
+    check("handoff logs 'hot_lead' once", hl == 1, str(hl))
     conn.close()
 
 

@@ -290,6 +290,31 @@ def test_matchers():
     check("detect('Я Роман, про деньги')==Финансы",
           content.detect_topic("Я Роман, про деньги", exclude_name="Роман") == content.TOPIC_MONEY)
 
+    print("\n== PRODUCTION REPLAY: реальные сообщения клиентов первого боевого дня ==")
+    # (name_expected, topic_expected, text) — findings of 2026-07-17 kept as regressions forever
+    replay = [
+        ("Вячеслав", content.TOPIC_LOVE,   "Вячеслав, будем ли вместе жить?"),
+        ("Маша",     content.TOPIC_LOVE,   "Маша,любовь,13.09.1991"),
+        ("Вася",     content.TOPIC_FUTURE, "Вася 01.15.1995 что меня ждет"),
+        ("Дарья",    content.TOPIC_LOVE,   "Дарья, любовь"),
+        ("Андрей",   content.TOPIC_LOVE,   "Андрей 12.08.1979 г. про него что он действитель"),
+        # «девушка» -> Любовь: разумная догадка (сообщение и правда про отношения)
+        (None,       content.TOPIC_LOVE,   "Очень большая девушка. Но все еще цепляюсь…"),
+        (None,       None,                 "Только если бесплатно)"),
+        ("Жанна",    content.TOPIC_FUTURE, "Жанна 20.11.1966.что происходит"),
+    ]
+    for exp_name, exp_topic, text in replay:
+        got_name = content.extract_name(text)
+        got_topic = content.detect_topic(text, exclude_name=got_name)
+        check(f"replay имя {text[:32]!r} -> {exp_name!r}", got_name == exp_name, f"got {got_name!r}")
+        check(f"replay тема {text[:32]!r} -> {str(exp_topic)[:12]!r}", got_topic == exp_topic,
+              f"got {got_topic!r}")
+    # new stoplist words never break real names that follow markers
+    check("extract('Уже поздно, но я Оля')=='Оля'", content.extract_name("Уже поздно, но я Оля") == "Оля")
+    check("extract('Вот, меня зовут Ира')=='Ира'", content.extract_name("Вот, меня зовут Ира") == "Ира")
+    check("detect('про неё, вернется ли')==Любовь",
+          content.detect_topic("про неё, вернется ли") == content.TOPIC_LOVE)
+
 
 async def test_retrigger():
     print("\n== re-trigger only after cooldown ==")

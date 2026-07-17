@@ -500,10 +500,9 @@ def test_daily_report():
     conn.execute("INSERT INTO events(ts,event,client_id,run_id) VALUES (?,?,?,1)", (y_s2+20, "topic_detected", 2))
     conn.execute("INSERT INTO events(ts,event,client_id,run_id) VALUES (?,?,?,1)", (y_s2+30, "topic_fallback", 3))
     m2 = report.collect(conn, *report.prev_day_window(now))
-    check("collect counts topic stats", m2["topic_detected"] == 2 and m2["topic_assigned"] == 3, str(m2))
+    check("collect counts topic stats (internal)", m2["topic_detected"] == 2 and m2["topic_assigned"] == 3, str(m2))
     out4 = report.build_report(conn, now, scope="yesterday")
-    check("digest line 'Тема понята: 2 из 3'", "Тема понята" in out4 and "<b>2</b> из 3" in out4,
-          out4.splitlines()[4] if len(out4.splitlines()) > 4 else out4)
+    check("digest does NOT show 'Тема понята' (internal only)", "Тема понята" not in out4, out4)
     conn.close()
 
 

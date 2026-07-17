@@ -80,14 +80,13 @@ def render(metrics, title):
     """HTML digest message from a metrics dict + a title line."""
     t, r, hot = metrics["triggered"], metrics["readings"], metrics["hot"]
     conv = round(len(hot) / t * 100) if t else 0
-    td = metrics.get("topic_detected", 0)
-    ta = metrics.get("topic_assigned", 0)
+    # NB: topic detected/fallback stats stay INTERNAL (events table + collect());
+    # the operator's digest deliberately does not include them.
     lines = [
         f"📊 <b>{title}</b> (МСК)",
         "",
         f"Написали ТАРО:      <b>{t}</b>",
         f"Дошли до разбора:   <b>{r}</b>",
-        f"Тема понята:        <b>{td}</b> из {ta}",
         f"🔥 Горячих лидов:    <b>{len(hot)}</b>   (конверсия {conv}%)",
     ]
     if hot:

@@ -176,6 +176,19 @@ async def test_topic_flow():
     check("fallback variant matches its topic", vt == ct, f"{vt!r} vs {ct!r}")
     check("fallback funnel still 7 messages", len(transport.sent_steps_for(910004)) == 7)
 
+    # (d2) «хочу расклад про любовь» as the ANSWER: funnel continues (no false handoff),
+    # topic locks Любовь — this is why «хочу расклад» was removed from INTENT_WORDS
+    transport, _ = await simulate.main(client_id=910006, seed=16, verbose=False,
+                                       messages=[(0, "ТАРО"),
+                                                 (40, "Меня зовут Вера, хочу расклад про любовь")])
+    ct, vt = topic_of(910006)
+    c = conn.execute("SELECT state, name FROM clients WHERE client_id=?", (910006,)).fetchone()
+    check("«хочу расклад про любовь» does NOT handoff (funnel completed)",
+          c["state"] == "CTA_SENT", c["state"])
+    check("…and locks Любовь", ct == content.TOPIC_LOVE and vt == content.TOPIC_LOVE, f"{ct!r}/{vt!r}")
+    check("…name Вера captured", c["name"] == "Вера", f"{c['name']!r}")
+    check("…all 7 delivered", len(transport.sent_steps_for(910006)) == 7)
+
     # (e) name trap in flow: «Меня зовут Люба» must NOT lock Любовь early
     transport, _ = await simulate.main(client_id=910005, seed=15, verbose=False,
                                        messages=[(0, "ТАРО"), (40, "Меня зовут Люба")])
@@ -222,8 +235,11 @@ def test_matchers():
     check("normal text not stop", not content.is_stop("привет как дела"))
     check("intent 'сколько цена?'", content.has_intent("сколько цена?"))
     check("intent 'хочу купить'", content.has_intent("хочу купить"))
+    check("intent 'готова оплатить'", content.has_intent("готова оплатить"))
     check("no false intent 'я заберу телефон'", not content.has_intent("я заберу телефон"))
     check("no false intent 'красивая сцена'", not content.has_intent("красивая сцена"))
+    check("'хочу расклад' is NOT intent (answer to ask, not buying)",
+          not content.has_intent("хочу расклад про любовь"))
 
 
 async def test_retrigger():

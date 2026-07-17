@@ -330,7 +330,10 @@ async def t_classifier_boundaries():
     check("'пожалуйста не пишите' NOT stop", not content.is_stop("пожалуйста не пишите так формально"))
     check("'не пиши мне' IS stop", content.is_stop("не пиши мне"))
     check("'не хочу расклад' NOT intent", not content.has_intent("не хочу никакой расклад"))
-    check("'хочу расклад' IS intent", content.has_intent("хочу расклад"))
+    # «хочу расклад» is a natural ANSWER to the ask step, deliberately NOT intent
+    check("'хочу расклад' NOT intent (it's an answer, not buying)",
+          not content.has_intent("хочу расклад"))
+    check("'хочу расклад про любовь' NOT intent", not content.has_intent("хочу расклад про любовь"))
     check("'готова оплатить' IS intent", content.has_intent("готова оплатить хоть сейчас"))
     check("'нет не куплю' NOT intent", not content.has_intent("нет не куплю"))
     check("'красивая сцена' NOT intent", not content.has_intent("красивая сцена из фильма"))

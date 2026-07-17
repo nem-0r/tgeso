@@ -74,8 +74,10 @@ RETRY_BACKOFF_BASE = 30    # seconds
 RETRY_BACKOFF_CAP = 300
 
 STOP_WORDS = {"стоп", "stop", "отписка", "отписаться", "хватит", "не пиши", "unsubscribe"}
+# NB: «хочу расклад» deliberately NOT here — it is a natural ANSWER to the ask step
+# («хочу расклад про любовь»), not buy intent. Post-CTA any reply is a hot lead anyway.
 INTENT_WORDS = {"куплю", "купить", "цена", "цену", "стоимость", "оплата", "оплатить",
-                "записаться", "запиши", "беру", "оплачу", "хочу расклад", "готова оплатить"}
+                "записаться", "запиши", "беру", "оплачу", "готова оплатить"}
 
 TERMINAL_STATES = {"STOPPED", "HANDOFF", "COMPLETED", "BLOCKED", "ABANDONED"}
 # after these states a client reply = engaged lead -> operator handoff

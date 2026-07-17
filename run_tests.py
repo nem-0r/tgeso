@@ -189,6 +189,19 @@ async def test_topic_flow():
     check("…name Вера captured", c["name"] == "Вера", f"{c['name']!r}")
     check("…all 7 delivered", len(transport.sent_steps_for(910006)) == 7)
 
+    # (d3) «Да, про деньги» — «Да» is NOT the name, topic still locks Финансы,
+    # intro degrades gracefully (no vocative), full chain delivered
+    transport, _ = await simulate.main(client_id=910007, seed=17, verbose=False,
+                                       messages=[(0, "ТАРО"), (40, "Да, про деньги")])
+    ct, vt = topic_of(910007)
+    c = conn.execute("SELECT name FROM clients WHERE client_id=?", (910007,)).fetchone()
+    check("«Да» not captured as a name", c["name"] is None, repr(c["name"]))
+    check("…but topic Финансы locked", ct == content.TOPIC_MONEY and vt == content.TOPIC_MONEY,
+          f"{ct!r}/{vt!r}")
+    intro = str(transport.sent_steps_for(910007)[3]["content"])
+    check("…intro has no «Да,» vocative", not intro.startswith("Да"), intro[:30])
+    check("…all 7 delivered", len(transport.sent_steps_for(910007)) == 7)
+
     # (e) name trap in flow: «Меня зовут Люба» must NOT lock Любовь early
     transport, _ = await simulate.main(client_id=910005, seed=15, verbose=False,
                                        messages=[(0, "ТАРО"), (40, "Меня зовут Люба")])
@@ -240,6 +253,19 @@ def test_matchers():
     check("no false intent 'красивая сцена'", not content.has_intent("красивая сцена"))
     check("'хочу расклад' is NOT intent (answer to ask, not buying)",
           not content.has_intent("хочу расклад про любовь"))
+    check("'не готова оплатить' NOT intent (phrase negation)",
+          not content.has_intent("я не готова оплатить"))
+    print("\n== name guards: affirmations/topic words are never names ==")
+    check("extract('Да, про деньги') is None", content.extract_name("Да, про деньги") is None,
+          repr(content.extract_name("Да, про деньги")))
+    check("extract('не скажу') is None", content.extract_name("не скажу") is None,
+          repr(content.extract_name("не скажу")))
+    check("extract('Деньги') is None", content.extract_name("Деньги") is None)
+    check("extract('любовь и деньги') is None", content.extract_name("любовь и деньги") is None)
+    check("extract('Меня зовут Любовь')=='Любовь'", content.extract_name("Меня зовут Любовь") == "Любовь")
+    check("extract('Я Роман')=='Роман'", content.extract_name("Я Роман") == "Роман")
+    check("detect('Я Роман, про деньги')==Финансы",
+          content.detect_topic("Я Роман, про деньги", exclude_name="Роман") == content.TOPIC_MONEY)
 
 
 async def test_retrigger():

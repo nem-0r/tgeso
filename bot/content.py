@@ -52,12 +52,13 @@ def has_intent(text: str) -> bool:
     ntoks = [norm(t) for t in tokens(text)]
     for w in config.INTENT_WORDS:
         wl = norm(w)
-        if " " in w:                                  # phrase: contiguous, word-bounded
-            if re.search(_phrase_re(wl), low):
-                return True
+        if " " in w:                                  # phrase: contiguous, word-bounded,
+            if re.search(_phrase_re(wl), low) and \
+               not re.search(r"(?<!\w)не\s+" + re.escape(wl) + r"(?!\w)", low):
+                return True                           # ...and not negated («не готова оплатить»)
         else:                                         # single token, not negated by 'не'
-            for i, t in enumerate(ntoks):
-                if t == wl and not (i > 0 and ntoks[i - 1] == "не"):
+            for i, t in enumerate(ntoks):             # («не куплю», «не готова оплатить»)
+                if t == wl and not any(ntoks[j] == "не" for j in range(max(0, i - 2), i)):
                     return True
     return False
 
@@ -85,7 +86,8 @@ _TOPIC_WORDS = {
         "жениться", "женюсь", "семья", "семье", "семью", "чувства", "чувств",
         "любимый", "любимая", "любимого", "любимую", "любимым",
         "избранник", "избранника", "избранница",
-        "роман", "романа", "измена", "измены", "изменяет", "ревность", "ревнует",
+        # NB: «роман» deliberately excluded — Роман is a common first name
+        "измена", "измены", "изменяет", "ревность", "ревнует",
         "одиночество", "одинока", "одинок",
     },
     TOPIC_MONEY: {
@@ -192,14 +194,25 @@ _NON_NAME = {
     "хочу", "хочется", "надо", "нужно", "можно", "можете", "подскажите", "подскажи",
     "помогите", "помоги", "узнать", "вопрос", "вопросик", "расскажи", "расскажите", "скажите",
     "гадание", "расклад", "таро", "гадать", "дай", "дайте", "про",
+    # affirmations / fillers — «Да, про деньги» must never yield the name «Да»
+    "да", "нет", "не", "ага", "угу", "ок", "окей", "ладно", "давай", "хорошо", "конечно", "ну",
 }
 _MARKERS = ("зовут", "звать", "я", "это")
 _NAME_RE = re.compile(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]{1,19}$")
+# every topic word, to keep «Деньги»/«Любовь и деньги» from being read as a name
+_ALL_TOPIC_TOKENS = frozenset().union(*_TOPIC_WORDS.values())
 
 
-def _valid_name(tok: str) -> bool:
-    return bool(_NAME_RE.match(tok)) and tok.lower() not in _NON_NAME \
-        and tok.lower() != config.CODE_WORD.lower()
+def _valid_name(tok: str, allow_topic_word=False) -> bool:
+    """allow_topic_word: only the explicit «меня зовут X» marker may accept a name that
+    doubles as a topic word (a real person called Любовь); everywhere else a topic word
+    is a topic answer («Деньги», «любовь и деньги»), never a name."""
+    if not _NAME_RE.match(tok) or tok.lower() in _NON_NAME \
+            or tok.lower() == config.CODE_WORD.lower():
+        return False
+    if not allow_topic_word and norm(tok) in _ALL_TOPIC_TOKENS:
+        return False
+    return True
 
 
 def _cap(tok: str) -> str:  # capitalise each hyphen-separated part
@@ -216,8 +229,8 @@ def extract_name(text: str):
     low = [t.lower() for t in toks]
     for i, t in enumerate(low):
         if t in ("зовут", "звать"):        # name may follow OR precede ("меня Маша зовут")
-            for j in (i + 1, i - 1):
-                if 0 <= j < len(toks) and _valid_name(toks[j]):
+            for j in (i + 1, i - 1):       # explicit marker -> even Любовь/Роман are names
+                if 0 <= j < len(toks) and _valid_name(toks[j], allow_topic_word=True):
                     return _cap(toks[j])
         elif t in ("я", "это") and i + 1 < len(toks) and _valid_name(toks[i + 1]):
             return _cap(toks[i + 1])

@@ -319,7 +319,13 @@ async def t_name_extraction():
     cases = [("Маша, что с деньгами", "Маша"), ("Добрый день, помогите с любовью", None),
              ("Что меня ждет?", None), ("Спасибо большое", None),
              ("Здравствуйте, меня зовут Маша", "Маша"), ("Привет, я Оля", "Оля"),
-             ("Анна-Мария", "Анна-Мария"), ("😀😀😀", None), ("П", None)]
+             ("Анна-Мария", "Анна-Мария"), ("😀😀😀", None), ("П", None),
+             # affirmations are never names
+             ("Да, про деньги", None), ("Нет", None), ("не скажу", None), ("Ага, понял", None),
+             # topic answers are never names
+             ("Деньги", None), ("любовь и деньги", None), ("Работа", None),
+             # ...but an explicit «меня зовут X» keeps a real name that doubles as a word
+             ("Меня зовут Любовь", "Любовь"), ("Я Роман", "Роман")]
     for text, exp in cases:
         got = content.extract_name(text)
         check(f"extract_name({text!r})=={exp!r}", got == exp, f"got {got!r}")

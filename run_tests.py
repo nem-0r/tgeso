@@ -128,6 +128,29 @@ def test_topic_detection():
         # ё normalisation + case
         ("что ждЁт меня", None, T.TOPIC_FUTURE),
         ("ЛЮБОВЬ", None, T.TOPIC_LOVE),
+        # situations (expanded dictionary)
+        ("он меня бросил, вернется ли бывший?", None, T.TOPIC_LOVE),
+        ("любит ли он меня", None, T.TOPIC_LOVE),
+        ("будем ли вместе", None, T.TOPIC_LOVE),
+        ("найду ли работу в этом году", None, T.TOPIC_MONEY),
+        ("вернут ли долг", None, T.TOPIC_MONEY),
+        ("прошла собеседование, возьмут?", None, T.TOPIC_MONEY),
+        ("получу ли наследство", None, T.TOPIC_MONEY),
+        ("что произойдет со мной", None, T.TOPIC_FUTURE),
+        ("как сложится жизнь", None, T.TOPIC_FUTURE),
+        ("сбудется ли мечта", None, T.TOPIC_FUTURE),
+        # typos (distance-1, len>=5, same first letter)
+        ("посмотри про денги", None, T.TOPIC_MONEY),
+        ("что с любов", None, T.TOPIC_LOVE),
+        ("мои отношеня с ним", None, T.TOPIC_LOVE),
+        ("зарплта когда вырастет", None, T.TOPIC_MONEY),
+        ("мое будуще", None, T.TOPIC_FUTURE),
+        # typo-guard negatives: real words must NOT fuzzy-match other topics
+        ("у меня забота о маме", None, None),          # забота != работа (первая буква)
+        ("мой брат приехал", None, None),              # брат != брак (короткое слово)
+        ("дннгт", None, None),                         # слишком искажено -> честный fallback
+        # exact match always beats fuzzy
+        ("денги или любовь", None, T.TOPIC_LOVE),      # любовь точная, денги — опечатка
     ]
     for text, excl, exp in cases:
         got = content.detect_topic(text, exclude_name=excl)

@@ -89,6 +89,12 @@ _TOPIC_WORDS = {
         # NB: «роман» deliberately excluded — Роман is a common first name
         "измена", "измены", "изменяет", "ревность", "ревнует",
         "одиночество", "одинока", "одинок",
+        # situations
+        "влюбленность", "страсть", "свидание", "свидания", "помолвка", "венчание",
+        "примирение", "помиримся", "сойдемся", "расстался", "рассталась", "разлука",
+        "бросил", "бросила", "разлюбил", "разлюбила", "нравлюсь",
+        "замужем", "женат", "холост", "разведена", "разведен",
+        "взаимность", "взаимности", "безответная", "безответной", "любит",
     },
     TOPIC_MONEY: {
         "деньги", "денег", "деньгам", "деньгами", "деньгах",
@@ -101,19 +107,86 @@ _TOPIC_WORDS = {
         "богатство", "прибыль", "прибыли", "инвестиции", "бабло",
         "премия", "премию", "повышение", "увольнение", "уволили", "уволят",
         "сокращение", "сократили",
+        # situations
+        "богат", "богатая", "разбогатею", "разбогатеть", "накопления", "сбережения",
+        "зарплатой", "оклад", "оклада", "подработка", "подработку", "фриланс",
+        "торговля", "продажи", "стартап", "инвестировать", "вложения", "вложить",
+        "крипта", "криптовалюта", "биткоин", "выигрыш", "выиграю", "лотерея",
+        "наследство", "наследства", "алименты", "безденежье", "нищета", "бедность",
+        "задолженность", "займ", "займы", "микрозайм", "банкротство", "банкрот",
+        "расходы", "траты", "бюджет", "начальник", "начальство", "увольняюсь",
+        "уволиться", "сокращают", "собеседование", "собеседования", "вакансия",
+        "вакансию", "трудоустройство", "работодатель",
     },
     TOPIC_FUTURE: {
         "будущее", "будущего", "будущем", "будущему", "будущий", "будущая",
         "судьба", "судьбы", "судьбе", "судьбу", "предназначение",
         "перспективы", "перспектива", "грядущее", "впереди",
+        # situations
+        "предсказание", "предсказания", "прогноз", "пророчество", "грядет",
+        "дальнейшее", "дальнейшая", "дальнейшей", "перемены", "перемен",
+        "изменения", "предначертано", "сложится", "ожидает", "предстоит",
+        "сбудется", "исполнится",
     },
 }
 _TOPIC_PHRASES = {
-    TOPIC_LOVE: ("вторая половинка", "личная жизнь", "личной жизни", "личную жизнь"),
-    TOPIC_MONEY: ("денежный вопрос",),
+    TOPIC_LOVE: ("вторая половинка", "личная жизнь", "личной жизни", "личную жизнь",
+                 "любит ли", "вернется ли он", "вернется ли она", "вернется ли муж",
+                 "вернется ли жена", "вернется ли парень", "вернется ли бывший",
+                 "вернется ли бывшая", "будем ли вместе", "мы расстались",
+                 "меня бросил", "меня бросила", "сойдемся ли", "помиримся ли",
+                 "выйду ли замуж", "женится ли", "есть ли чувства"),
+    TOPIC_MONEY: ("денежный вопрос", "найду ли работу", "сменю ли работу",
+                  "повысят ли", "вернут ли долг", "отдадут ли долг", "вернут ли деньги"),
     TOPIC_FUTURE: ("что ждет", "что меня ждет", "что нас ждет",
-                   "что будет", "что будет дальше", "что дальше"),
+                   "что будет", "что будет дальше", "что дальше",
+                   "что ожидает", "что предстоит", "как сложится",
+                   "что произойдет", "что случится", "ближайшее время"),
 }
+
+
+def _lev1(a: str, b: str) -> bool:
+    """True if edit distance(a, b) <= 1 (one substitution, insertion or deletion)."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    if la > lb:
+        a, b, la, lb = b, a, lb, la
+    i = j = diff = 0
+    while i < la and j < lb:
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+        else:
+            j += 1
+            diff += 1
+            if diff > 1:
+                return False
+    return True
+
+
+def _fuzzy_topic(tok: str):
+    """Typo-tolerant topic for one token: distance<=1 against the dictionaries, but
+    ONLY for tokens >=5 chars with the same first letter — so «денги/зарплта/любов»
+    match while real words like «забота» (vs «работа») or «брат» (vs «брак») never do.
+    Ambiguity across topics -> None (better an honest fallback than a wrong guess)."""
+    if len(tok) < 5:
+        return None
+    found = None
+    for topic in TOPICS:
+        for w in _TOPIC_WORDS[topic]:
+            if w[0] != tok[0] or abs(len(w) - len(tok)) > 1:
+                continue
+            if _lev1(tok, w):
+                if found is not None and found != topic:
+                    return None
+                found = topic
+                break
+    return found
 
 
 def detect_topic(text: str, exclude_name=None):
@@ -123,12 +196,14 @@ def detect_topic(text: str, exclude_name=None):
     topic word, so «Меня зовут Люба/Любовь» does not read as the Love topic.
     Priority: the specific topics (Любовь, Финансы) beat the generic Будущее
     («будущий муж» -> Любовь, «финансовое будущее» -> Финансы); between the two
-    specific ones the earliest mention in the text wins."""
+    specific ones the earliest mention in the text wins. If nothing matches exactly,
+    a conservative distance-1 typo pass runs («денги» -> Финансы)."""
     if not text:
         return None
     low = norm(text)
     excl = norm(exclude_name) if exclude_name else None
-    present = {norm(t) for t in tokens(text)}
+    ordered = [norm(t) for t in tokens(text)]
+    present = set(ordered)
     if excl:
         present.discard(excl)
     hits = {}   # topic -> earliest char position in the normalised text
@@ -141,6 +216,13 @@ def detect_topic(text: str, exclude_name=None):
             m = re.search(_phrase_re(norm(p)), low)
             if m:
                 hits[topic] = min(hits.get(topic, 1 << 30), m.start())
+    if not hits:  # typo pass, exact matches always win
+        for pos, t in enumerate(ordered):
+            if t == excl:
+                continue
+            ft = _fuzzy_topic(t)
+            if ft:
+                hits[ft] = min(hits.get(ft, 1 << 30), pos)
     if not hits:
         return None
     specific = {t: pos for t, pos in hits.items() if t != TOPIC_FUTURE}

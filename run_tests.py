@@ -506,6 +506,29 @@ def test_daily_report():
     conn.close()
 
 
+def test_ops_safety():
+    print("\n== ops safety: dev tools can never destroy live data ==")
+    # run_import.py must be content-only by default (audit footgun #1)
+    src = open("run_import.py", encoding="utf-8").read()
+    check("run_import default is SAFE (wipe_runtime=fresh, not True)",
+          "run(wipe_runtime=fresh)" in src and "--fresh" in src)
+    # run_chat must sandbox into a throwaway copy (audit footgun #2)
+    import run_chat
+    check("run_chat sandboxes into a COPY, not the real DB",
+          run_chat.CHAT_DB != config.DB_PATH and "tarot_chat_sandbox" in run_chat.CHAT_DB)
+    # importer with wipe_runtime=False preserves clients (the live-update path)
+    conn = dbm.connect()
+    conn.execute("INSERT OR REPLACE INTO clients(client_id,state,run_id,created_at,updated_at) "
+                 "VALUES (424242,'CTA_SENT',1,0,0)")
+    from bot import importer
+    importer.run(verbose=False, wipe_runtime=False)
+    conn2 = dbm.connect()
+    alive = conn2.execute("SELECT COUNT(*) AS c FROM clients WHERE client_id=424242").fetchone()["c"]
+    check("re-import (content update) preserves live clients", alive == 1, str(alive))
+    conn2.execute("DELETE FROM clients WHERE client_id=424242")
+    conn.close(); conn2.close()
+
+
 async def main():
     await test_sequence_and_media()
     await test_timings()
@@ -521,6 +544,7 @@ async def main():
     test_distribution()
     test_topic_detection()
     await test_topic_flow()
+    test_ops_safety()
     await test_idempotency()
     print("\n" + "=" * 50)
     if FAILS:

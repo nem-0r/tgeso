@@ -13,17 +13,23 @@ Interactive:  python3 run_chat.py
 One-shot:     python3 run_chat.py --probe "Очень большая девушка"
     prints how the bot parses the message (code word / stop / intent / name / topic).
 
-Uses the LOCAL dev DB (same wipe-runtime pattern as bot/simulate.py). Never touches prod.
+SAFETY: works on a THROWAWAY COPY of the DB (content included) in the temp dir —
+the real database is physically never opened for writing, so this tool is safe to
+run anywhere, including the production server. --probe touches no DB at all.
 """
 import asyncio
+import os
+import shutil
 import sys
+import tempfile
 
-from bot import config, content, funnel, scheduler, simulate
+from bot import config, content, funnel, scheduler
 from bot import db as dbm
 from bot.clock import VirtualClock
 from bot.transport import SimulatedTransport
 
 CID = 990001
+CHAT_DB = os.path.join(tempfile.gettempdir(), "tarot_chat_sandbox.sqlite")
 
 
 def probe(text):
@@ -47,9 +53,20 @@ def fmt_out(ev, t0):
 
 class Chat:
     def __init__(self):
-        simulate._ensure_content()
-        self.conn = dbm.connect()
+        # sandbox: copy the real DB (for its content tables) and work ONLY on the copy
+        if not os.path.exists(config.DB_PATH):
+            raise SystemExit(f"нет базы {config.DB_PATH} — сначала: python3 run_import.py")
+        shutil.copyfile(config.DB_PATH, CHAT_DB)
+        for ext in ("-wal", "-shm"):   # never inherit live WAL journals
+            p = CHAT_DB + ext
+            if os.path.exists(p):
+                os.remove(p)
+        self.conn = dbm.connect(CHAT_DB)
         dbm.init(self.conn)
+        n = self.conn.execute("SELECT COUNT(*) AS c FROM variants").fetchone()["c"]
+        if n != 66:
+            raise SystemExit("контент не импортирован — сначала: python3 run_import.py")
+        print(f"— песочница: {CHAT_DB} (реальная база не трогается)")
         self.reset()
 
     def reset(self):

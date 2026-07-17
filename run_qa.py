@@ -53,7 +53,8 @@ class H:
         self.conn = dbm.connect(QA_DB)
         with dbm.transaction(self.conn):
             dbm.wipe(self.conn, dbm.RUNTIME_TABLES)
-        variants.rebuild_bag(self.conn, random.Random(seed))
+        for _t in variants.topics(self.conn):
+            variants.rebuild_bag(self.conn, _t, random.Random(seed))
         self.clock = VirtualClock(1_700_000_000)
         self.t0 = self.clock.now()
         self.rng = random.Random(seed)
@@ -468,14 +469,18 @@ async def t_ttl_and_window():
 
 
 async def t_distribution():
-    print("\n== even-random distribution over 3 full cycles ==")
+    print("\n== even-random distribution over 3 full cycles WITHIN each topic ==")
     h = H(seed=24)
-    n = h.conn.execute("SELECT COUNT(*) AS c FROM variants").fetchone()["c"]
-    counts = defaultdict(int)
-    for _ in range(n * 3):
-        counts[variants.draw_variant(h.conn, h.rng)] += 1
-    check(f"all {n} variants used exactly 3x", len(counts) == n and set(counts.values()) == {3},
-          str(sorted(set(counts.values()))))
+    for t in variants.topics(h.conn):
+        n = h.conn.execute("SELECT COUNT(*) AS c FROM variants WHERE topic=?", (t,)).fetchone()["c"]
+        counts = defaultdict(int)
+        for _ in range(n * 3):
+            counts[variants.draw_variant(h.conn, t, h.rng)] += 1
+        own = {r["variant_id"] for r in h.conn.execute(
+            "SELECT variant_id FROM variants WHERE topic=?", (t,))}
+        check(f"{t}: all {n} used exactly 3x", len(counts) == n and set(counts.values()) == {3},
+              str(sorted(set(counts.values()))))
+        check(f"{t}: draws never leave the topic", set(counts) <= own)
     h.close()
 
 

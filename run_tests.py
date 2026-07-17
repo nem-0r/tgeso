@@ -69,16 +69,135 @@ async def test_name_fallback():
 
 
 def test_distribution():
-    print("\n== even-random distribution (shuffled bag) ==")
+    print("\n== even-random distribution WITHIN each topic (per-topic bags) ==")
     conn = dbm.connect()
-    variants.rebuild_bag(conn, random.Random(9))
-    n = conn.execute("SELECT COUNT(*) AS c FROM variants").fetchone()["c"]
-    counts = {}
-    for _ in range(n * 2):
-        vid = variants.draw_variant(conn, random.Random(0))
-        counts[vid] = counts.get(vid, 0) + 1
-    check(f"all {n} variants used exactly twice over 2 bags",
-          len(counts) == n and set(counts.values()) == {2}, str(sorted(set(counts.values()))))
+    tops = variants.topics(conn)
+    check("3 topics in DB", len(tops) == 3, str(tops))
+    for t in tops:
+        variants.rebuild_bag(conn, t, random.Random(9))
+        n = conn.execute("SELECT COUNT(*) AS c FROM variants WHERE topic=?", (t,)).fetchone()["c"]
+        counts = {}
+        for _ in range(n * 2):
+            vid = variants.draw_variant(conn, t, random.Random(0))
+            counts[vid] = counts.get(vid, 0) + 1
+        own = {r["variant_id"] for r in conn.execute(
+            "SELECT variant_id FROM variants WHERE topic=?", (t,))}
+        check(f"{t}: all {n} used exactly twice over 2 bags",
+              len(counts) == n and set(counts.values()) == {2}, str(sorted(set(counts.values()))))
+        check(f"{t}: every draw stays inside the topic", set(counts) <= own)
+    conn.close()
+
+
+def test_topic_detection():
+    print("\n== topic detection: synonyms, name traps, priorities ==")
+    T = content
+    cases = [
+        # (text, exclude_name, expected)
+        ("Меня зовут Саша, расскажи про мою половинку", None, T.TOPIC_LOVE),
+        ("что с любовью?", None, T.TOPIC_LOVE),
+        ("посмотри отношения с мужем", None, T.TOPIC_LOVE),
+        ("вернется ли бывший", None, T.TOPIC_LOVE),
+        ("когда выйду замуж", None, T.TOPIC_LOVE),
+        ("про личную жизнь", None, T.TOPIC_LOVE),
+        ("что с деньгами", None, T.TOPIC_MONEY),
+        ("Игорь, про работу", None, T.TOPIC_MONEY),
+        ("посмотри финансы и зп", None, T.TOPIC_MONEY),
+        ("бизнес пойдет ли в гору", None, T.TOPIC_MONEY),
+        ("долги задушили, что делать", None, T.TOPIC_MONEY),
+        ("что меня ждет", None, T.TOPIC_FUTURE),
+        ("расскажи про будущее", None, T.TOPIC_FUTURE),
+        ("какая у меня судьба", None, T.TOPIC_FUTURE),
+        ("что будет дальше", None, T.TOPIC_FUTURE),
+        # priorities: specific beats the generic Будущее
+        ("будущий муж — кто он?", None, T.TOPIC_LOVE),
+        ("финансовое будущее", None, T.TOPIC_MONEY),
+        ("что ждет в отношениях", None, T.TOPIC_LOVE),
+        # both specific -> earliest mention wins
+        ("про любовь и деньги", None, T.TOPIC_LOVE),
+        ("сначала деньги, потом любовь", None, T.TOPIC_MONEY),
+        # name traps: names must never read as topics
+        ("Меня зовут Люба", "Люба", None),
+        ("Меня зовут Любовь", "Любовь", None),
+        ("Я Денис", "Денис", None),
+        ("любой вопрос", None, None),
+        ("мне любопытно", None, None),
+        # no topic at all
+        ("Меня зовут Аня", None, None),
+        ("привет как дела", None, None),
+        ("", None, None),
+        # ё normalisation + case
+        ("что ждЁт меня", None, T.TOPIC_FUTURE),
+        ("ЛЮБОВЬ", None, T.TOPIC_LOVE),
+    ]
+    for text, excl, exp in cases:
+        got = content.detect_topic(text, exclude_name=excl)
+        check(f"detect({text[:36]!r})=={exp and exp[:12]!r}", got == exp, f"got {got!r}")
+
+
+async def test_topic_flow():
+    print("\n== topic flow: lock from trigger/answer, lock-once, fallback, retrigger reset ==")
+    conn = dbm.connect()
+
+    def topic_of(cid):
+        c = conn.execute("SELECT topic, variant_id FROM clients WHERE client_id=?", (cid,)).fetchone()
+        vt = conn.execute("SELECT topic FROM variants WHERE variant_id=?", (c["variant_id"],)).fetchone()
+        return c["topic"], vt["topic"] if vt else None
+
+    # (a) topic inside the TRIGGER message itself
+    transport, _ = await simulate.main(client_id=910001, seed=11, verbose=False,
+                                       messages=[(0, "ТАРО что скажешь про любовь"),
+                                                 (40, "Меня Маша зовут")])
+    ct, vt = topic_of(910001)
+    check("trigger-message topic locks Любовь", ct == content.TOPIC_LOVE, f"{ct!r}")
+    check("variant drawn FROM Любовь bag", vt == content.TOPIC_LOVE, f"{vt!r}")
+    check("full chain still 7 messages", len(transport.sent_steps_for(910001)) == 7)
+
+    # (b) topic in the ANSWER (name+topic in one message)
+    transport, _ = await simulate.main(client_id=910002, seed=12, verbose=False,
+                                       messages=[(0, "ТАРО"),
+                                                 (40, "Меня зовут Игорь, что с деньгами?")])
+    ct, vt = topic_of(910002)
+    check("answer topic locks Финансы", ct == content.TOPIC_MONEY and vt == content.TOPIC_MONEY,
+          f"{ct!r}/{vt!r}")
+
+    # (c) lock-once: second topic mention does NOT switch
+    transport, _ = await simulate.main(client_id=910003, seed=13, verbose=False,
+                                       messages=[(0, "ТАРО"), (30, "про деньги"),
+                                                 (60, "нет, лучше про любовь")])
+    ct, vt = topic_of(910003)
+    check("first detected topic (Финансы) is locked", ct == content.TOPIC_MONEY and vt == content.TOPIC_MONEY,
+          f"{ct!r}/{vt!r}")
+
+    # (d) NO topic ever -> card-time fallback assigns a random topic, funnel completes
+    transport, _ = await simulate.main(client_id=910004, seed=14, verbose=False,
+                                       messages=[(0, "ТАРО"), (40, "Аня")])
+    ct, vt = topic_of(910004)
+    check("fallback assigned some topic", ct in content.TOPICS, f"{ct!r}")
+    check("fallback variant matches its topic", vt == ct, f"{vt!r} vs {ct!r}")
+    check("fallback funnel still 7 messages", len(transport.sent_steps_for(910004)) == 7)
+
+    # (e) name trap in flow: «Меня зовут Люба» must NOT lock Любовь early
+    transport, _ = await simulate.main(client_id=910005, seed=15, verbose=False,
+                                       messages=[(0, "ТАРО"), (40, "Меня зовут Люба")])
+    c = conn.execute("SELECT name, topic FROM clients WHERE client_id=?", (910005,)).fetchone()
+    check("name Люба captured", c["name"] == "Люба", f"{c['name']!r}")
+    # topic comes only from fallback => it is whatever the fallback drew; the point is
+    # the LOCK happened at card time, not from the name. Verify intro used the name:
+    sent = transport.sent_steps_for(910005)
+    check("intro personalised with 'Люба'", "Люба" in str(sent[3]["content"]))
+
+    # (f) re-trigger resets topic and redraws in the NEW topic
+    # NB: each simulate.main() wipes runtime tables, so re-use the LAST client (910005).
+    cfull = conn.execute("SELECT updated_at, run_id FROM clients WHERE client_id=?", (910005,)).fetchone()
+    later = cfull["updated_at"] + config.RETRIGGER_COOLDOWN + 5
+    res = funnel.handle_incoming(conn, 910005, "ТАРО теперь про будущее", later,
+                                 bcid="SIM", rng=random.Random(1))
+    check("re-triggered after cooldown", res["action"] == "re-triggered", str(res))
+    ct, vt = topic_of(910005)
+    check("new run locked Будущее", ct == content.TOPIC_FUTURE and vt == content.TOPIC_FUTURE,
+          f"{ct!r}/{vt!r}")
+    c2 = conn.execute("SELECT name FROM clients WHERE client_id=?", (910005,)).fetchone()
+    check("name reset on re-trigger", c2["name"] is None, f"{c2['name']!r}")
     conn.close()
 
 
@@ -292,6 +411,8 @@ async def main():
     test_mark_read_gating()
     test_daily_report()
     test_distribution()
+    test_topic_detection()
+    await test_topic_flow()
     await test_idempotency()
     print("\n" + "=" * 50)
     if FAILS:

@@ -15,7 +15,7 @@ import os
 import random
 import sqlite3
 
-from . import config, content
+from . import config, content, variants
 from .db import transaction
 
 TERMINAL = config.TERMINAL_STATES
@@ -40,6 +40,23 @@ def _media_path(conn, variant_id):
 def _next_step(step_name):
     i = config.STEP_ORDER.index(step_name)
     return config.STEP_ORDER[i + 1] if i + 1 < len(config.STEP_ORDER) else None
+
+
+def _ensure_variant(conn, client, rng=None):
+    """Card-time fallback: if no topic was ever detected in the client's messages,
+    assign a random topic's variant now so the client always gets a reading
+    (mirrors the pre-topic fully-random behaviour). variant_id is the lock."""
+    if client["variant_id"] is not None:
+        return client
+    topic = client["topic"] or (rng or random).choice(variants.topics(conn))
+    vid = variants.draw_variant(conn, topic, rng)   # outside the txn (rebuild opens its own)
+    with transaction(conn):
+        conn.execute(
+            "UPDATE clients SET topic=COALESCE(topic, ?), variant_id=?, version=version+1 "
+            "WHERE client_id=? AND variant_id IS NULL",
+            (topic, vid, client["client_id"]))
+    return conn.execute("SELECT * FROM clients WHERE client_id=?",
+                        (client["client_id"],)).fetchone()
 
 
 def _delay(step_name, rng=None):
@@ -155,6 +172,10 @@ async def _process(conn, transport, s, now, rng=None):
         return _halt(conn, s, now, "stale-ttl")
     if client["last_incoming_at"] and now - client["last_incoming_at"] > config.WINDOW_SAFETY:
         return _halt(conn, s, now, "24h-window")
+
+    # 2b) the card steps need a variant: lock the card-time fallback if none detected
+    if step in ("image", "diagnosis") and client["variant_id"] is None:
+        client = _ensure_variant(conn, client, rng)
 
     # 3) CTA at-most-once: reserve sent_log BEFORE the irreversible send
     if step == "cta":

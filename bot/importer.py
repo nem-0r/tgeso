@@ -166,7 +166,8 @@ def run(xlsx_path=None, db_path=None, media_dir=None, verbose=True, wipe_runtime
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (v["idx"], v["topic"], v["card_number"], v["card_name"],
                  v["texts"]["diagnosis"], h))
-    rebuild_bag(conn)
+    for t in sorted(topic_cards):          # one shuffled bag per topic
+        rebuild_bag(conn, t)
 
     report = {
         "variants": len(variants),

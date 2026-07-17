@@ -36,19 +36,22 @@ CREATE TABLE IF NOT EXISTS variants (
 );
 
 CREATE TABLE IF NOT EXISTS bag (
-    position   INTEGER PRIMARY KEY,
-    variant_id INTEGER NOT NULL
+    topic      TEXT NOT NULL,            -- per-topic shuffled bag (even-random WITHIN a topic)
+    position   INTEGER NOT NULL,
+    variant_id INTEGER NOT NULL,
+    PRIMARY KEY (topic, position)
 );
 CREATE TABLE IF NOT EXISTS bag_cursor (
-    id  INTEGER PRIMARY KEY CHECK (id = 1),
-    pos INTEGER NOT NULL
+    topic TEXT PRIMARY KEY,
+    pos   INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS clients (
     client_id        INTEGER PRIMARY KEY,   -- telegram user id of the client
     bcid             TEXT,                  -- business_connection_id (nullable in sim)
     state            TEXT NOT NULL DEFAULT 'NEW',
-    variant_id       INTEGER,
+    variant_id       INTEGER,               -- NULL until the topic locks (or card-time fallback)
+    topic            TEXT,                  -- detected client topic; locked together with variant_id
     name             TEXT,
     question         TEXT,
     run_id           INTEGER NOT NULL DEFAULT 1,
@@ -137,8 +140,22 @@ def connect(path=None) -> sqlite3.Connection:
     return conn
 
 
+def _columns(conn, table):
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
 def init(conn):
+    # Migration: bag/bag_cursor gained a topic dimension (per-topic even-random).
+    # They are content tables (no client data) — drop old-schema ones; the importer
+    # or the first draw rebuilds them from `variants`.
+    bag_cols = _columns(conn, "bag")
+    if bag_cols and "topic" not in bag_cols:
+        conn.execute("DROP TABLE bag")
+        conn.execute("DROP TABLE IF EXISTS bag_cursor")
     conn.executescript(SCHEMA)
+    # Migration: clients.topic (additive, nullable — safe on a live DB).
+    if "topic" not in _columns(conn, "clients"):
+        conn.execute("ALTER TABLE clients ADD COLUMN topic TEXT")
 
 
 def wipe(conn, tables):

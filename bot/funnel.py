@@ -4,8 +4,13 @@ handle_incoming() classifies an inbound message and mutates state:
   code word  -> start (or re-trigger after cooldown) the timed drip
   stop word  -> STOPPED + cancel pending
   buy intent -> HANDOFF + cancel pending (caller notifies the operator)
-  otherwise  -> capture the client's name+question (once), for the r6 intro
+  otherwise  -> capture the client's name+question (once), for the r6 intro,
+                and detect their TOPIC (любовь/финансы/будущее) to pick the card
+                from the right category (per-topic bag, even-random within it).
 
+The variant is NOT drawn at trigger time any more: it locks when a topic is
+detected in any client message before the card, or (if none) the scheduler's
+card-time fallback assigns a random topic. variant_id doubles as the lock.
 The timed chain itself is driven by the scheduler; this module only schedules
 the FIRST step (greeting at +7 min) on trigger.
 """
@@ -46,13 +51,12 @@ def _schedule_first(conn, client_id, run_id, now):
 def start_or_reset(conn, client_id, bcid, now, rng=None):
     c = get_client(conn, client_id)
     if c is None:
-        vid = draw_variant(conn, rng)
         with transaction(conn):
             conn.execute(
-                "INSERT INTO clients(client_id, bcid, state, variant_id, run_id, "
+                "INSERT INTO clients(client_id, bcid, state, variant_id, topic, run_id, "
                 "triggered_at, last_incoming_at, created_at, updated_at) "
-                "VALUES (?, ?, 'TRIGGERED', ?, 1, ?, ?, ?, ?)",
-                (client_id, bcid, vid, now, now, now, now))
+                "VALUES (?, ?, 'TRIGGERED', NULL, NULL, 1, ?, ?, ?, ?)",
+                (client_id, bcid, now, now, now, now))
             _schedule_first(conn, client_id, 1, now)
             log_event(conn, "triggered", client_id, 1, now)
         return "triggered"
@@ -60,21 +64,40 @@ def start_or_reset(conn, client_id, bcid, now, rng=None):
     if (c["state"] in config.TERMINAL_STATES or c["state"] == "CTA_SENT") \
             and (now - c["updated_at"]) >= config.RETRIGGER_COOLDOWN:
         new_run = c["run_id"] + 1
-        vid = draw_variant(conn, rng)
         with transaction(conn):
             conn.execute("UPDATE steps SET status='cancelled' "
                          "WHERE client_id=? AND run_id=? AND status='pending'",
                          (client_id, c["run_id"]))
             conn.execute(
-                "UPDATE clients SET state='TRIGGERED', variant_id=?, run_id=?, name=NULL, "
-                "question=NULL, triggered_at=?, last_incoming_at=?, version=version+1, "
-                "updated_at=? WHERE client_id=?",
-                (vid, new_run, now, now, now, client_id))
+                "UPDATE clients SET state='TRIGGERED', variant_id=NULL, topic=NULL, "
+                "run_id=?, name=NULL, question=NULL, triggered_at=?, last_incoming_at=?, "
+                "version=version+1, updated_at=? WHERE client_id=?",
+                (new_run, now, now, now, client_id))
             _schedule_first(conn, client_id, new_run, now)
             log_event(conn, "triggered", client_id, new_run, now)
         return "re-triggered"
 
     return "ignored"  # already in an active funnel, or cooldown not elapsed
+
+
+def maybe_set_topic(conn, client_id, text, now, rng=None):
+    """Detect the client's topic from any pre-card message; on first detection draw
+    the variant from that topic's bag and lock both (variant_id IS the lock — set
+    either here or by the scheduler's card-time fallback, never changed after)."""
+    c = get_client(conn, client_id)
+    if c is None or c["state"] in config.TERMINAL_STATES or c["variant_id"] is not None:
+        return None
+    exclude = c["name"] or content.extract_name(text)
+    topic = content.detect_topic(text, exclude_name=exclude)
+    if topic is None:
+        return None
+    vid = draw_variant(conn, topic, rng)   # outside the txn: rebuild_bag opens its own
+    with transaction(conn):
+        cur = conn.execute(
+            "UPDATE clients SET topic=?, variant_id=?, version=version+1, updated_at=? "
+            "WHERE client_id=? AND variant_id IS NULL",
+            (topic, vid, now, client_id))
+    return topic if cur.rowcount == 1 else None
 
 
 def capture_answer(conn, client_id, text, now):
@@ -160,6 +183,8 @@ def handle_incoming(conn, client_id, text, now, bcid=None, msg_id=None, rng=None
     if is_cw:
         action = start_or_reset(conn, client_id, bcid, now, rng)
         if action != "ignored":
+            # the trigger message itself may already carry the topic («ТАРО про любовь»)
+            maybe_set_topic(conn, client_id, text, now, rng)
             return {"action": action}
 
     c = get_client(conn, client_id)
@@ -168,6 +193,8 @@ def handle_incoming(conn, client_id, text, now, bcid=None, msg_id=None, rng=None
         if c["state"] == "CTA_SENT" or content.has_intent(text):
             _terminate(conn, client_id, "HANDOFF", now, event="hot_lead")
             return {"action": "handoff", "client_id": client_id, "name": c["name"]}
+        # topic can arrive in any message until the card locks it (incl. repeated code word)
+        maybe_set_topic(conn, client_id, text, now, rng)
         if is_cw:
             return {"action": "ignored"}   # active client just repeated the code word
         return {"action": capture_answer(conn, client_id, text, now)}

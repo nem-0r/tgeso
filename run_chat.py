@@ -72,7 +72,12 @@ class Chat:
         pend = self.conn.execute("SELECT step_name, run_at FROM steps WHERE client_id=? AND status='pending' "
                                  "ORDER BY run_at LIMIT 1", (CID,)).fetchone()
         nxt = f"{pend['step_name']} через {pend['run_at'] - self.clock.now()}с" if pend else "нет"
-        print(f"  state={c['state']}  имя={c['name']!r}  тема={c['topic']!r}")
+        src = self.conn.execute(
+            "SELECT event FROM events WHERE client_id=? AND event IN ('topic_detected','topic_fallback') "
+            "ORDER BY id DESC LIMIT 1", (CID,)).fetchone()
+        how = {"topic_detected": "определена из слов клиента",
+               "topic_fallback": "НЕ понята -> случайная"}.get(src["event"] if src else None, "ещё не выбрана")
+        print(f"  state={c['state']}  имя={c['name']!r}  тема={c['topic']!r} ({how})")
         print(f"  карта: {card}   следующий шаг: {nxt}")
 
     def show_new_sends(self):

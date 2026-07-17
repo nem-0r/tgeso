@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS business_connections (
 CREATE TABLE IF NOT EXISTS events (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     ts        INTEGER NOT NULL,          -- epoch UTC of the event
-    event     TEXT NOT NULL,             -- 'triggered' | 'hot_lead'
+    event     TEXT NOT NULL,             -- 'triggered' | 'hot_lead' | 'topic_detected' | 'topic_fallback'
     client_id INTEGER,
     run_id    INTEGER
 );

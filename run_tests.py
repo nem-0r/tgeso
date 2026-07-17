@@ -182,6 +182,9 @@ async def test_topic_flow():
     ct, vt = topic_of(910002)
     check("answer topic locks Финансы", ct == content.TOPIC_MONEY and vt == content.TOPIC_MONEY,
           f"{ct!r}/{vt!r}")
+    ev = [r["event"] for r in conn.execute(
+        "SELECT event FROM events WHERE client_id=? AND event LIKE 'topic_%'", (910002,))]
+    check("observability: exactly one topic_detected", ev == ["topic_detected"], str(ev))
 
     # (c) lock-once: second topic mention does NOT switch
     transport, _ = await simulate.main(client_id=910003, seed=13, verbose=False,
@@ -198,6 +201,9 @@ async def test_topic_flow():
     check("fallback assigned some topic", ct in content.TOPICS, f"{ct!r}")
     check("fallback variant matches its topic", vt == ct, f"{vt!r} vs {ct!r}")
     check("fallback funnel still 7 messages", len(transport.sent_steps_for(910004)) == 7)
+    ev = [r["event"] for r in conn.execute(
+        "SELECT event FROM events WHERE client_id=? AND event LIKE 'topic_%'", (910004,))]
+    check("observability: exactly one topic_fallback", ev == ["topic_fallback"], str(ev))
 
     # (d2) «хочу расклад про любовь» as the ANSWER: funnel continues (no false handoff),
     # topic locks Любовь — this is why «хочу расклад» was removed from INTENT_WORDS
@@ -485,6 +491,19 @@ def test_daily_report():
     check("post-CTA reply -> handoff", r["action"] == "handoff")
     hl = conn.execute("SELECT COUNT(*) c FROM events WHERE client_id=4242 AND event='hot_lead'").fetchone()["c"]
     check("handoff logs 'hot_lead' once", hl == 1, str(hl))
+
+    # topic observability line in the digest: «Тема понята: X из Y»
+    with dbm.transaction(conn):
+        dbm.wipe(conn, dbm.RUNTIME_TABLES)
+    y_s2, _ = report.prev_day_window(now)
+    conn.execute("INSERT INTO events(ts,event,client_id,run_id) VALUES (?,?,?,1)", (y_s2+10, "topic_detected", 1))
+    conn.execute("INSERT INTO events(ts,event,client_id,run_id) VALUES (?,?,?,1)", (y_s2+20, "topic_detected", 2))
+    conn.execute("INSERT INTO events(ts,event,client_id,run_id) VALUES (?,?,?,1)", (y_s2+30, "topic_fallback", 3))
+    m2 = report.collect(conn, *report.prev_day_window(now))
+    check("collect counts topic stats", m2["topic_detected"] == 2 and m2["topic_assigned"] == 3, str(m2))
+    out4 = report.build_report(conn, now, scope="yesterday")
+    check("digest line 'Тема понята: 2 из 3'", "Тема понята" in out4 and "<b>2</b> из 3" in out4,
+          out4.splitlines()[4] if len(out4.splitlines()) > 4 else out4)
     conn.close()
 
 

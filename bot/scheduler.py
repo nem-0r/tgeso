@@ -16,7 +16,7 @@ import random
 import sqlite3
 
 from . import config, content, variants
-from .db import transaction
+from .db import transaction, log_event as dbm_log_event
 
 TERMINAL = config.TERMINAL_STATES
 
@@ -42,7 +42,7 @@ def _next_step(step_name):
     return config.STEP_ORDER[i + 1] if i + 1 < len(config.STEP_ORDER) else None
 
 
-def _ensure_variant(conn, client, rng=None):
+def _ensure_variant(conn, client, now, rng=None):
     """Card-time fallback: if no topic was ever detected in the client's messages,
     assign a random topic's variant now so the client always gets a reading
     (mirrors the pre-topic fully-random behaviour). variant_id is the lock."""
@@ -51,10 +51,12 @@ def _ensure_variant(conn, client, rng=None):
     topic = client["topic"] or (rng or random).choice(variants.topics(conn))
     vid = variants.draw_variant(conn, topic, rng)   # outside the txn (rebuild opens its own)
     with transaction(conn):
-        conn.execute(
+        cur = conn.execute(
             "UPDATE clients SET topic=COALESCE(topic, ?), variant_id=?, version=version+1 "
             "WHERE client_id=? AND variant_id IS NULL",
             (topic, vid, client["client_id"]))
+        if cur.rowcount == 1:   # observability: topic was NOT understood -> random
+            dbm_log_event(conn, "topic_fallback", client["client_id"], client["run_id"], now)
     return conn.execute("SELECT * FROM clients WHERE client_id=?",
                         (client["client_id"],)).fetchone()
 
@@ -175,7 +177,7 @@ async def _process(conn, transport, s, now, rng=None):
 
     # 2b) the card steps need a variant: lock the card-time fallback if none detected
     if step in ("image", "diagnosis") and client["variant_id"] is None:
-        client = _ensure_variant(conn, client, rng)
+        client = _ensure_variant(conn, client, now, rng)
 
     # 3) CTA at-most-once: reserve sent_log BEFORE the irreversible send
     if step == "cta":

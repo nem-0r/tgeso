@@ -60,7 +60,14 @@ def collect(conn, start, end):
         "LEFT JOIN clients c ON c.client_id = e.client_id "
         "WHERE e.event='hot_lead' AND e.ts>=? AND e.ts<? ORDER BY e.ts",
         (start, end)).fetchall()
+    detected = conn.execute(
+        "SELECT COUNT(*) AS c FROM events WHERE event='topic_detected' AND ts>=? AND ts<?",
+        (start, end)).fetchone()["c"]
+    fallback = conn.execute(
+        "SELECT COUNT(*) AS c FROM events WHERE event='topic_fallback' AND ts>=? AND ts<?",
+        (start, end)).fetchone()["c"]
     return {"triggered": triggered, "readings": readings,
+            "topic_detected": detected, "topic_assigned": detected + fallback,
             "hot": [(r["cid"], r["name"]) for r in hot_rows]}
 
 
@@ -73,11 +80,14 @@ def render(metrics, title):
     """HTML digest message from a metrics dict + a title line."""
     t, r, hot = metrics["triggered"], metrics["readings"], metrics["hot"]
     conv = round(len(hot) / t * 100) if t else 0
+    td = metrics.get("topic_detected", 0)
+    ta = metrics.get("topic_assigned", 0)
     lines = [
         f"📊 <b>{title}</b> (МСК)",
         "",
         f"Написали ТАРО:      <b>{t}</b>",
         f"Дошли до разбора:   <b>{r}</b>",
+        f"Тема понята:        <b>{td}</b> из {ta}",
         f"🔥 Горячих лидов:    <b>{len(hot)}</b>   (конверсия {conv}%)",
     ]
     if hot:

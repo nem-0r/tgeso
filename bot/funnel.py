@@ -97,6 +97,8 @@ def maybe_set_topic(conn, client_id, text, now, rng=None):
             "UPDATE clients SET topic=?, variant_id=?, version=version+1, updated_at=? "
             "WHERE client_id=? AND variant_id IS NULL",
             (topic, vid, now, client_id))
+        if cur.rowcount == 1:   # observability: detected from the client's own words
+            log_event(conn, "topic_detected", client_id, c["run_id"], now)
     return topic if cur.rowcount == 1 else None
 
 

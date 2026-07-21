@@ -62,7 +62,7 @@ async def main(client_id=900001, seed=7, verbose=True, messages=None):
             if res["action"] == "handoff":
                 await transport.notify_operator(
                     f"🔥 Горячий лид {cid} ({res.get('name')}) — подключись")
-            elif res["action"] == "early_lead":
+            elif res["action"] == "early_lead" or res.get("early_lead"):
                 await transport.notify_operator(
                     f"💡 Ранний интерес {cid} ({res.get('name')}) — воронка продолжается")
 

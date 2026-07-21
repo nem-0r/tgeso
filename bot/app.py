@@ -100,7 +100,7 @@ async def _run_live():
             await transport.notify_operator(
                 f'🔥 Горячий лид: <a href="tg://user?id={msg.from_user.id}">{nm}</a>\n'
                 f'написал: {body}', html=True)
-        elif res["action"] == "early_lead":
+        elif res["action"] == "early_lead" or res.get("early_lead"):
             nm = html.escape(res.get("name") or "клиент")
             body = html.escape(text[:80])
             await transport.notify_operator(

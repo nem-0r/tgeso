@@ -2,6 +2,9 @@
 
 handle_incoming() classifies an inbound message and mutates state:
   code word  -> start (or re-trigger after cooldown) the timed drip
+  FIRST message from an unknown person (any content incl. stickers/gifs) -> start
+               the drip too (config.FIRST_CONTACT_TRIGGER; re-trigger stays
+               code-word-only; owner-initiated chats are protected)
   stop word  -> STOPPED + cancel pending (client opt-out — the only auto-stop)
   buy intent BEFORE the reading -> 'early_lead': ping the operator once, funnel
                CONTINUES (client still gets the card+diagnosis)
@@ -167,9 +170,18 @@ def owner_reply_is_own_send(conn, client_id, msg_id):
 def owner_took_over(conn, client_id, now):
     """The account owner wrote in this chat herself -> a human took the conversation.
     Cancel the pending drip and mark HANDOFF so the bot stops auto-sending here.
-    No-op if the chat is not an active funnel client (e.g. her ordinary contacts)."""
+    If the chat has NO client record, the owner INITIATED it herself — remember it as
+    a human-owned chat (terminal HANDOFF row) so the counterpart's later reply never
+    fires the first-contact trigger. The code word can still re-open it after the
+    cooldown, like any terminal client."""
     c = get_client(conn, client_id)
-    if c is None or c["state"] in config.TERMINAL_STATES:
+    if c is None:
+        with transaction(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO clients(client_id, state, run_id, created_at, updated_at) "
+                "VALUES (?, 'HANDOFF', 1, ?, ?)", (client_id, now, now))
+        return False
+    if c["state"] in config.TERMINAL_STATES:
         return False
     with transaction(conn):
         cancel_pending(conn, client_id, c["run_id"])
@@ -185,18 +197,42 @@ def handle_incoming(conn, client_id, text, now, bcid=None, msg_id=None, rng=None
         touch_incoming(conn, client_id, bcid, now)
 
     if content.is_stop(text):
-        _terminate(conn, client_id, "STOPPED", now)
+        if get_client(conn, client_id) is None:
+            # opt-out from an UNKNOWN person must persist, otherwise their next
+            # message would fire the first-contact trigger (opt-out bypass)
+            with transaction(conn):
+                conn.execute(
+                    "INSERT OR IGNORE INTO clients(client_id, state, run_id, created_at, updated_at) "
+                    "VALUES (?, 'STOPPED', 1, ?, ?)", (client_id, now, now))
+        else:
+            _terminate(conn, client_id, "STOPPED", now)
         return {"action": "stopped"}
 
-    # code word: start / re-trigger. If it can't (active client / cooldown not elapsed),
-    # fall through so a CTA_SENT/engaged reply still reaches the hand-off branch.
+    # Triggers: the code word (works always, incl. re-trigger after cooldown) OR the
+    # very first message from an unknown person (any content, stickers/gifs included).
+    # If neither can start (active client / cooldown), fall through so a CTA_SENT /
+    # engaged reply still reaches the hand-off branch.
     is_cw = content.is_code_word(text)
-    if is_cw:
+    first_contact = (config.FIRST_CONTACT_TRIGGER and not is_cw
+                     and get_client(conn, client_id) is None)
+    if is_cw or first_contact:
         action = start_or_reset(conn, client_id, bcid, now, rng)
         if action != "ignored":
-            # the trigger message itself may already carry the topic («ТАРО про любовь»)
+            c2 = get_client(conn, client_id)
+            if first_contact:
+                with transaction(conn):
+                    log_event(conn, "first_contact", client_id, c2["run_id"], now)
+            # the trigger message itself may already carry the topic/name/intent
+            # («ТАРО про любовь», «Привет, я Аня, сколько стоит расклад?»)
             maybe_set_topic(conn, client_id, text, now, rng)
-            return {"action": action}
+            capture_answer(conn, client_id, text, now)
+            res = {"action": action, "client_id": client_id}
+            if content.has_intent(text):
+                with transaction(conn):
+                    log_event(conn, "early_lead", client_id, c2["run_id"], now)
+                res["early_lead"] = True
+                res["name"] = get_client(conn, client_id)["name"]
+            return res
 
     c = get_client(conn, client_id)
     if c and c["state"] not in config.TERMINAL_STATES and c["state"] != "NEW":

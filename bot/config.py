@@ -19,6 +19,12 @@ MEDIA_DIR = os.environ.get("TAROT_MEDIA", _p("media"))
 
 # --- trigger ---
 CODE_WORD = os.environ.get("TAROT_CODE_WORD", "ТАРО")
+# ANY first message from an unknown person (text/sticker/gif -> empty text) also
+# starts the funnel. NB: "unknown" = not in our DB, i.e. first contact SINCE the bot
+# was connected — Telegram cannot tell us about older history. Chats the owner
+# started herself are protected (see funnel.owner_took_over). Kill switch:
+# TAROT_FIRST_CONTACT=0 reverts to code-word-only triggering (no redeploy needed).
+FIRST_CONTACT_TRIGGER = os.environ.get("TAROT_FIRST_CONTACT", "1") == "1"
 
 # --- Telegram (STUB until provided) ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")               # None => simulation only

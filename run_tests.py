@@ -508,6 +508,109 @@ def test_daily_report():
     conn.close()
 
 
+async def test_first_contact():
+    print("\n== first-contact trigger: любое первое сообщение незнакомца запускает воронку ==")
+    conn = dbm.connect()
+
+    # (1) обычный «Привет» от незнакомца -> воронка, имя/тема из следующего сообщения
+    transport, _ = await simulate.main(client_id=970001, seed=61, verbose=False,
+                                       messages=[(0, "Привет, как дела?"),
+                                                 (9 * 60, "Меня зовут Оля, про деньги")])
+    c = conn.execute("SELECT state, name, topic FROM clients WHERE client_id=?", (970001,)).fetchone()
+    check("«Привет» запустил воронку, 7/7", len(transport.sent_steps_for(970001)) == 7)
+    check("state CTA_SENT", c["state"] == "CTA_SENT", c["state"])
+    check("имя Оля и тема Финансы захвачены", c["name"] == "Оля" and c["topic"] == content.TOPIC_MONEY,
+          f"{c['name']!r}/{c['topic']!r}")
+    fc = conn.execute("SELECT COUNT(*) c FROM events WHERE client_id=? AND event='first_contact'",
+                      (970001,)).fetchone()["c"]
+    check("событие first_contact записано", fc == 1, str(fc))
+
+    # (2) стикер/гифка (пустой текст) -> воронка, без имени, тема-fallback на карте
+    transport, _ = await simulate.main(client_id=970002, seed=62, verbose=False,
+                                       messages=[(0, "")])
+    c = conn.execute("SELECT state, name, topic FROM clients WHERE client_id=?", (970002,)).fetchone()
+    check("стикер (пустой текст) запустил воронку, 7/7", len(transport.sent_steps_for(970002)) == 7)
+    check("имя None, тема назначена fallback'ом", c["name"] is None and c["topic"] in content.TOPICS,
+          f"{c['name']!r}/{c['topic']!r}")
+    intro = str(transport.sent_steps_for(970002)[3]["content"])
+    check("интро без обращения и без {name}", "{name}" not in intro and intro[:1].isupper())
+
+    # (3) первое сообщение с именем+темой сразу: всё захвачено из ОДНОГО сообщения
+    transport, _ = await simulate.main(client_id=970003, seed=63, verbose=False,
+                                       messages=[(0, "Здравствуйте, меня зовут Ира, что с любовью?")])
+    c = conn.execute("SELECT name, topic FROM clients WHERE client_id=?", (970003,)).fetchone()
+    check("имя Ира из первого сообщения", c["name"] == "Ира", repr(c["name"]))
+    check("тема Любовь из первого сообщения", c["topic"] == content.TOPIC_LOVE, repr(c["topic"]))
+    check("7/7 доставлено", len(transport.sent_steps_for(970003)) == 7)
+
+    # (4) первое сообщение «сколько стоит?» -> воронка + ранний пинг гадалке
+    transport, _ = await simulate.main(client_id=970004, seed=64, verbose=False,
+                                       messages=[(0, "сколько стоит расклад?")])
+    alerts = [e for e in transport.events if e["kind"] == "alert"]
+    check("интент в первом сообщении: воронка живёт, 7/7",
+          len(transport.sent_steps_for(970004)) == 7)
+    check("ровно один ранний пинг", len(alerts) == 1 and "Ранний интерес" in str(alerts[0]["content"]),
+          str(alerts))
+
+    # (5) первое сообщение «стоп» -> опт-аут ПЕРСИСТИТСЯ (обход через след. сообщение невозможен)
+    with dbm.transaction(conn):
+        dbm.wipe(conn, dbm.RUNTIME_TABLES)
+    r = funnel.handle_incoming(conn, 970005, "стоп", 1000, bcid="SIM")
+    c = funnel.get_client(conn, 970005)
+    check("«стоп» первым сообщением -> stopped + запись STOPPED", r["action"] == "stopped"
+          and c is not None and c["state"] == "STOPPED", str(r))
+    r = funnel.handle_incoming(conn, 970005, "привет", 1005, bcid="SIM")
+    check("следующее сообщение НЕ запускает воронку (opt-out bypass закрыт)",
+          r["action"] == "ignored", str(r))
+    r = funnel.handle_incoming(conn, 970005, "ТАРО", 1010, bcid="SIM")
+    check("и ТАРО сразу после «стоп» тоже игнорируется (кулдаун)", r["action"] == "ignored", str(r))
+    r = funnel.handle_incoming(conn, 970005, "ТАРО", 1000 + config.RETRIGGER_COOLDOWN + 5, bcid="SIM")
+    check("ТАРО спустя кулдаун -> явный повторный опт-ин работает", r["action"] == "re-triggered", str(r))
+
+    # (6) kill-switch: TAROT_FIRST_CONTACT=0 -> старое поведение (только ТАРО)
+    config.FIRST_CONTACT_TRIGGER = False
+    try:
+        r = funnel.handle_incoming(conn, 970006, "Привет!", 1000, bcid="SIM")
+        check("выключено: «Привет» игнорируется", r["action"] == "ignored"
+              and funnel.get_client(conn, 970006) is None, str(r))
+        r = funnel.handle_incoming(conn, 970006, "ТАРО", 1001, bcid="SIM")
+        check("выключено: ТАРО по-прежнему работает", r["action"] == "triggered", str(r))
+    finally:
+        config.FIRST_CONTACT_TRIGGER = True
+
+    # (7) существующий завершённый клиент: «привет» НЕ перезапускает, ТАРО — да
+    cid = 970007
+    funnel.start_or_reset(conn, cid, "SIM", now=2000)
+    conn.execute("UPDATE clients SET state='CTA_SENT', updated_at=2000 WHERE client_id=?", (cid,))
+    later = 2000 + config.RETRIGGER_COOLDOWN + 10
+    r = funnel.handle_incoming(conn, cid, "привет, ну что там", later, bcid="SIM")
+    check("старый клиент + «привет» после кулдауна -> handoff (не перезапуск)",
+          r["action"] == "handoff", str(r))   # CTA_SENT reply = горячий лид, как раньше
+    cid = 970008
+    funnel.start_or_reset(conn, cid, "SIM", now=2000)
+    conn.execute("UPDATE clients SET state='COMPLETED', updated_at=2000 WHERE client_id=?", (cid,))
+    r = funnel.handle_incoming(conn, cid, "привет", later, bcid="SIM")
+    check("терминальный клиент + «привет» -> ignored (только ТАРО перезапускает)",
+          r["action"] == "ignored", str(r))
+    r = funnel.handle_incoming(conn, cid, "ТАРО", later + 5, bcid="SIM")
+    check("терминальный клиент + ТАРО -> re-triggered", r["action"] == "re-triggered", str(r))
+
+    # (8) чат, начатый САМОЙ гадалкой -> защищён от авто-воронки
+    cid = 970009
+    check("гадалка пишет первой: no-op", funnel.owner_took_over(conn, cid, now=3000) is False)
+    c = funnel.get_client(conn, cid)
+    check("чат помечен как её (HANDOFF)", c is not None and c["state"] == "HANDOFF",
+          str(c and c["state"]))
+    r = funnel.handle_incoming(conn, cid, "привет, спасибо что написала!", 3010, bcid="SIM")
+    check("ответ собеседника НЕ запускает воронку", r["action"] == "ignored", str(r))
+    pend = conn.execute("SELECT COUNT(*) c FROM steps WHERE client_id=? AND status='pending'",
+                        (cid,)).fetchone()["c"]
+    check("шагов не запланировано", pend == 0, str(pend))
+    r = funnel.handle_incoming(conn, cid, "ТАРО", 3000 + config.RETRIGGER_COOLDOWN + 10, bcid="SIM")
+    check("…но ТАРО после кулдауна открывает воронку", r["action"] == "re-triggered", str(r))
+    conn.close()
+
+
 async def test_early_lead():
     print("\n== early lead: цена ДО разбора не убивает воронку (прод-инцидент 21.07, клиент «n») ==")
     conn = dbm.connect()
@@ -610,6 +713,7 @@ async def main():
     test_topic_detection()
     await test_topic_flow()
     await test_early_lead()
+    await test_first_contact()
     test_ops_safety()
     await test_idempotency()
     print("\n" + "=" * 50)

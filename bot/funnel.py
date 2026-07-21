@@ -2,8 +2,10 @@
 
 handle_incoming() classifies an inbound message and mutates state:
   code word  -> start (or re-trigger after cooldown) the timed drip
-  stop word  -> STOPPED + cancel pending
-  buy intent -> HANDOFF + cancel pending (caller notifies the operator)
+  stop word  -> STOPPED + cancel pending (client opt-out — the only auto-stop)
+  buy intent BEFORE the reading -> 'early_lead': ping the operator once, funnel
+               CONTINUES (client still gets the card+diagnosis)
+  buy intent AFTER the reading / any reply after CTA -> HANDOFF + cancel pending
   otherwise  -> capture the client's name+question (once), for the r6 intro,
                 and detect their TOPIC (любовь/финансы/будущее) to pick the card
                 from the right category (per-topic bag, even-random within it).
@@ -125,6 +127,13 @@ def capture_answer(conn, client_id, text, now):
     return "captured"
 
 
+def _diagnosis_sent(conn, client_id, run_id):
+    """True once the client's reading (r8 diagnosis) has been delivered on this run."""
+    return conn.execute(
+        "SELECT 1 FROM sent_log WHERE client_id=? AND run_id=? AND step_name='diagnosis'",
+        (client_id, run_id)).fetchone() is not None
+
+
 def cancel_pending(conn, client_id, run_id):
     conn.execute("UPDATE steps SET status='cancelled' "
                  "WHERE client_id=? AND run_id=? AND status='pending'",
@@ -191,12 +200,30 @@ def handle_incoming(conn, client_id, text, now, bcid=None, msg_id=None, rng=None
 
     c = get_client(conn, client_id)
     if c and c["state"] not in config.TERMINAL_STATES and c["state"] != "NEW":
-        # after the CTA, ANY reply is a hot lead; buy-intent at any active step -> handoff
-        if c["state"] == "CTA_SENT" or content.has_intent(text):
+        intent = content.has_intent(text)
+        # FULL handoff (cancel the drip) only once the client HAS their reading:
+        # any reply after the CTA, or buy-intent after the diagnosis was delivered.
+        if c["state"] == "CTA_SENT" or (intent and _diagnosis_sent(conn, client_id, c["run_id"])):
             _terminate(conn, client_id, "HANDOFF", now, event="hot_lead")
             return {"action": "handoff", "client_id": client_id, "name": c["name"]}
         # topic can arrive in any message until the card locks it (incl. repeated code word)
         maybe_set_topic(conn, client_id, text, now, rng)
+        if intent:
+            # EARLY interest (price asked before the reading): NEVER stop the funnel —
+            # the client must still receive the card+diagnosis. Ping the operator once
+            # per run; the message still feeds name/topic capture as usual.
+            first = conn.execute(
+                "SELECT 1 FROM events WHERE client_id=? AND run_id=? AND event='early_lead'",
+                (client_id, c["run_id"])).fetchone() is None
+            if first:
+                with transaction(conn):
+                    log_event(conn, "early_lead", client_id, c["run_id"], now)
+            if not is_cw:
+                capture_answer(conn, client_id, text, now)
+            if first:
+                c2 = get_client(conn, client_id)
+                return {"action": "early_lead", "client_id": client_id, "name": c2["name"]}
+            return {"action": "noted"}
         if is_cw:
             return {"action": "ignored"}   # active client just repeated the code word
         return {"action": capture_answer(conn, client_id, text, now)}

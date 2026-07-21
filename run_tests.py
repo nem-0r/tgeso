@@ -284,6 +284,8 @@ def test_matchers():
           not content.has_intent("хочу расклад про любовь"))
     check("'не готова оплатить' NOT intent (phrase negation)",
           not content.has_intent("я не готова оплатить"))
+    check("'сколько стоит?' IS intent (phrase)", content.has_intent("сколько стоит?"))
+    check("'стоит ли возвращаться' NOT intent", not content.has_intent("стоит ли возвращаться к бывшему"))
     print("\n== name guards: affirmations/topic words are never names ==")
     check("extract('Да, про деньги') is None", content.extract_name("Да, про деньги") is None,
           repr(content.extract_name("Да, про деньги")))
@@ -506,6 +508,69 @@ def test_daily_report():
     conn.close()
 
 
+async def test_early_lead():
+    print("\n== early lead: цена ДО разбора не убивает воронку (прод-инцидент 21.07, клиент «n») ==")
+    conn = dbm.connect()
+
+    # (1) точный реплей инцидента 347984820: ТАРО -> ответ «сколько цена?» после «я в работе»
+    transport, _ = await simulate.main(client_id=920001, seed=31, verbose=False,
+                                       messages=[(0, "ТАРО"), (13 * 60, "сколько цена?")])
+    sent = transport.sent_steps_for(920001)
+    c = conn.execute("SELECT state FROM clients WHERE client_id=?", (920001,)).fetchone()
+    check("клиент ПОЛУЧИЛ все 7 сообщений (раньше: 3 и обрыв)", len(sent) == 7, str(len(sent)))
+    check("state=CTA_SENT (воронка дожила до конца)", c["state"] == "CTA_SENT", c["state"])
+    alerts = [e for e in transport.events if e["kind"] == "alert"]
+    check("гадалке ушёл РОВНО ОДИН ранний пинг", len(alerts) == 1
+          and "Ранний интерес" in str(alerts[0]["content"]), str(alerts))
+    ev = [r["event"] for r in conn.execute(
+        "SELECT event FROM events WHERE client_id=? AND event IN ('early_lead','hot_lead')", (920001,))]
+    check("событие early_lead one-shot, hot_lead НЕ создано", ev == ["early_lead"], str(ev))
+
+    # (2) интент в сообщении с именем и темой: всё захватывается, воронка живёт
+    transport, _ = await simulate.main(client_id=920002, seed=32, verbose=False,
+                                       messages=[(0, "ТАРО"), (30, "Аня, про деньги. сколько стоит?")])
+    c = conn.execute("SELECT state, name, topic FROM clients WHERE client_id=?", (920002,)).fetchone()
+    check("имя Аня захвачено несмотря на интент", c["name"] == "Аня", repr(c["name"]))
+    check("тема Финансы захвачена", c["topic"] == content.TOPIC_MONEY, repr(c["topic"]))
+    check("7/7 доставлено", len(transport.sent_steps_for(920002)) == 7)
+
+    # (3) повторный интент в том же прогоне -> без второго пинга
+    transport, _ = await simulate.main(client_id=920003, seed=33, verbose=False,
+                                       messages=[(0, "ТАРО"), (30, "сколько стоит?"),
+                                                 (60, "ну так цена какая")])
+    alerts = [e for e in transport.events if e["kind"] == "alert"]
+    check("два интент-сообщения -> один пинг", len(alerts) == 1, str(len(alerts)))
+    check("7/7 доставлено", len(transport.sent_steps_for(920003)) == 7)
+
+    # (4) интент ПОСЛЕ разбора -> полный handoff (отмена CTA), как раньше
+    cid = 920004
+    with dbm.transaction(conn):
+        dbm.wipe(conn, dbm.RUNTIME_TABLES)
+    funnel.start_or_reset(conn, cid, "SIM", now=1000)
+    conn.execute("UPDATE clients SET state='DIAGNOSED', variant_id=0, topic='Любовь/отношения' "
+                 "WHERE client_id=?", (cid,))
+    conn.execute("INSERT INTO sent_log(client_id,run_id,step_name,tg_message_id,sent_at) "
+                 "VALUES (?,1,'diagnosis',77,1500)", (cid,))
+    conn.execute("INSERT OR IGNORE INTO steps(client_id,run_id,step_name,run_at,status,created_at) "
+                 "VALUES (?,1,'cta',1530,'pending',1500)", (cid,))
+    r = funnel.handle_incoming(conn, cid, "беру, оплачу", 1520, bcid="SIM")
+    check("интент после разбора -> handoff", r["action"] == "handoff", str(r))
+    check("state HANDOFF", funnel.get_client(conn, cid)["state"] == "HANDOFF")
+    pend = conn.execute("SELECT COUNT(*) c FROM steps WHERE client_id=? AND status='pending'",
+                        (cid,)).fetchone()["c"]
+    check("ожидающий CTA отменён", pend == 0, str(pend))
+    hl = conn.execute("SELECT COUNT(*) c FROM events WHERE client_id=? AND event='hot_lead'",
+                      (cid,)).fetchone()["c"]
+    check("hot_lead записан", hl == 1)
+
+    # (5) «стоп» — единственный авто-стоп — работает как раньше
+    transport, _ = await simulate.main(client_id=920005, seed=35, verbose=False,
+                                       messages=[(0, "ТАРО"), (30, "стоп")])
+    c = conn.execute("SELECT state FROM clients WHERE client_id=?", (920005,)).fetchone()
+    check("«стоп» по-прежнему останавливает", c["state"] == "STOPPED", c["state"])
+    conn.close()
+
+
 def test_ops_safety():
     print("\n== ops safety: dev tools can never destroy live data ==")
     # run_import.py must be content-only by default (audit footgun #1)
@@ -544,6 +609,7 @@ async def main():
     test_distribution()
     test_topic_detection()
     await test_topic_flow()
+    await test_early_lead()
     test_ops_safety()
     await test_idempotency()
     print("\n" + "=" * 50)

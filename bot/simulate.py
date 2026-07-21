@@ -54,21 +54,24 @@ async def main(client_id=900001, seed=7, verbose=True, messages=None):
     timeline = []  # (t, direction, desc)
     inbox = [(t0 + off, client_id, text) for off, text in messages]
 
-    def deliver_incoming():
+    async def deliver_incoming():
         while inbox and inbox[0][0] <= clock.now():
             t, cid, text = inbox.pop(0)
             timeline.append((t, "IN", f"клиент: {text}"))
             res = funnel.handle_incoming(conn, cid, text, clock.now(), bcid="SIM", rng=rng)
             if res["action"] == "handoff":
-                asyncio.ensure_future(transport.notify_operator(
-                    f"🔥 Горячий лид {cid} ({res.get('name')}) — подключись"))
+                await transport.notify_operator(
+                    f"🔥 Горячий лид {cid} ({res.get('name')}) — подключись")
+            elif res["action"] == "early_lead":
+                await transport.notify_operator(
+                    f"💡 Ранний интерес {cid} ({res.get('name')}) — воронка продолжается")
 
     guard = 0
     while True:
         guard += 1
         if guard > 100000:
             raise RuntimeError("simulation did not terminate")
-        deliver_incoming()
+        await deliver_incoming()
         await scheduler.tick(conn, transport, clock.now(), rng)
         nxt_step = scheduler.next_pending_run_at(conn)
         nxt_msg = inbox[0][0] if inbox else None

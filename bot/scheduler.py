@@ -61,11 +61,31 @@ def _ensure_variant(conn, client, now, rng=None):
                         (client["client_id"],)).fetchone()
 
 
-def _delay(step_name, rng=None):
-    d = config.STEP_DELAY[step_name]
+def _jitter(d, rng=None):
     if config.JITTER_ENABLED and d >= 60:
         d = int(d * (rng or random).uniform(0.85, 1.2))
     return d
+
+
+def _chain_next(conn, cid, step_name):
+    """Which step follows `step_name` for this client and after what delay.
+    'ask' branches: if the client already wrote something after the trigger message
+    (early answer), «working» is anchored reactively; otherwise we wait for a reply
+    via the nudge path. Everything else follows the static chain."""
+    if step_name == "ask":
+        c = conn.execute("SELECT triggered_at, last_incoming_at, name, topic FROM clients "
+                         "WHERE client_id=?", (cid,)).fetchone()
+        pre_answered = c is not None and (
+            (c["last_incoming_at"] and c["triggered_at"]
+             and c["last_incoming_at"] > c["triggered_at"])   # wrote again before the ask
+            or c["name"] is not None or c["topic"] is not None)  # or said it all in msg #1
+        if pre_answered:
+            return "working", config.WORKING_AFTER_REPLY
+        return "nudge", config.NUDGE_AFTER_ASK
+    nxt = _next_step(step_name)
+    if nxt is None:
+        return None, None
+    return nxt, config.STEP_DELAY[nxt]
 
 
 async def deliver(conn, transport, client, step_name):
@@ -75,7 +95,9 @@ async def deliver(conn, transport, client, step_name):
         await transport.send_chat_action(chat, "upload_photo", bcid)
         path = _media_path(conn, client["variant_id"])
         return await transport.send_photo(chat, path, None, bcid)
-    if step_name == "diagnosis":
+    if step_name == "nudge":
+        text = config.NUDGE_TEXT          # настраивается через TAROT_NUDGE_TEXT без кода
+    elif step_name == "diagnosis":
         text = _variant(conn, client["variant_id"])["diagnosis"]
     elif step_name == "intro":
         text = content.render_intro(_template(conn, "intro"), client["name"])
@@ -88,10 +110,10 @@ async def deliver(conn, transport, client, step_name):
 def _confirm(conn, step_row, client, step_name, mid, now, rng=None):
     """The message is already delivered (irreversible), so ALWAYS mark it sent and
     record sent_log. But only chain the next step + advance state if the client is
-    still alive on the same run — a STOP/HANDOFF/re-trigger may have landed during
+    still alive on the same run — a HANDOFF/re-trigger may have landed during
     the send (TOCTOU); otherwise we'd resurrect a cancelled funnel."""
-    nxt = _next_step(step_name)
     cid = client["client_id"]
+    nxt, ndelay = _chain_next(conn, cid, step_name)
     with transaction(conn):
         conn.execute("UPDATE steps SET status='sent' WHERE id=?", (step_row["id"],))
         conn.execute(
@@ -108,7 +130,7 @@ def _confirm(conn, step_row, client, step_name, mid, now, rng=None):
                 conn.execute(
                     "INSERT OR IGNORE INTO steps(client_id, run_id, step_name, run_at, status, created_at) "
                     "VALUES (?, ?, ?, ?, 'pending', ?)",
-                    (cid, step_row["run_id"], nxt, now + _delay(nxt, rng), now))
+                    (cid, step_row["run_id"], nxt, now + _jitter(ndelay, rng), now))
             conn.execute("UPDATE clients SET state=?, version=version+1, updated_at=? WHERE client_id=?",
                          (config.STATE_AFTER[step_name], now, cid))
 
@@ -170,7 +192,26 @@ async def _process(conn, transport, s, now, rng=None):
         return _skip(conn, s["id"], "stale-run")
     if client["state"] in TERMINAL:
         return _skip(conn, s["id"], "terminal-state")
-    if now - s["run_at"] > config.STEP_TTL.get(step, 3600):
+    if step == "nudge":
+        # the nudge is only for a SILENT client; and however it is skipped, the
+        # chain must survive — the funnel always completes (with or without a name)
+        ask = conn.execute(
+            "SELECT sent_at FROM sent_log WHERE client_id=? AND run_id=? AND step_name='ask'",
+            (client["client_id"], s["run_id"])).fetchone()
+        replied = (ask is not None and client["last_incoming_at"] is not None
+                   and client["last_incoming_at"] > ask["sent_at"])
+        stale = now - s["run_at"] > config.STEP_TTL.get("nudge", 3600)
+        if replied or stale:
+            delay = config.WORKING_AFTER_REPLY if replied else config.WORKING_AFTER_NUDGE
+            with transaction(conn):
+                conn.execute("UPDATE steps SET status='skipped', last_error=? WHERE id=?",
+                             ("client-replied" if replied else "stale-ttl", s["id"]))
+                conn.execute(
+                    "INSERT OR IGNORE INTO steps(client_id, run_id, step_name, run_at, status, created_at) "
+                    "VALUES (?, ?, 'working', ?, 'pending', ?)",
+                    (client["client_id"], s["run_id"], now + delay, now))
+            return
+    elif now - s["run_at"] > config.STEP_TTL.get(step, 3600):
         return _halt(conn, s, now, "stale-ttl")
     if client["last_incoming_at"] and now - client["last_incoming_at"] > config.WINDOW_SAFETY:
         return _halt(conn, s, now, "24h-window")

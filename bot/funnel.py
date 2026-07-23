@@ -5,7 +5,9 @@ handle_incoming() classifies an inbound message and mutates state:
   FIRST message from an unknown person (any content incl. stickers/gifs) -> start
                the drip too (config.FIRST_CONTACT_TRIGGER; re-trigger stays
                code-word-only; owner-initiated chats are protected)
-  stop word  -> STOPPED + cancel pending (client opt-out — the only auto-stop)
+  «я в работе» is REACTIVE: anchored to the client's first reply (+15 мин); a
+               silent client gets a nudge after 30 мин and the funnel then continues
+               WITHOUT the name — it ALWAYS completes (nothing auto-stops it)
   buy intent BEFORE the reading -> internal 'early_lead' event only (NO ping), the
                funnel continues — the client still gets the card+diagnosis
   buy intent AFTER the reading / any reply after CTA -> HANDOFF + cancel pending
@@ -138,6 +140,27 @@ def _diagnosis_sent(conn, client_id, run_id):
         (client_id, run_id)).fetchone() is not None
 
 
+def _anchor_working(conn, c, now):
+    """The client's ANY message after the greeting anchors «я в работе» to reply +
+    WORKING_AFTER_REPLY. The FIRST reply wins (MIN keeps the earliest anchor, so extra
+    messages — name first, question later — never postpone the funnel), and a pending
+    nudge is cancelled: the client is talking, no reminder needed."""
+    if c["state"] not in ("GREETED", "ASKED"):
+        return
+    run_at = now + config.WORKING_AFTER_REPLY
+    with transaction(conn):
+        conn.execute("UPDATE steps SET status='cancelled' WHERE client_id=? AND run_id=? "
+                     "AND step_name='nudge' AND status='pending'", (c["client_id"], c["run_id"]))
+        cur = conn.execute("UPDATE steps SET run_at=MIN(run_at, ?) WHERE client_id=? AND run_id=? "
+                           "AND step_name='working' AND status='pending'",
+                           (run_at, c["client_id"], c["run_id"]))
+        if cur.rowcount == 0:
+            conn.execute(
+                "INSERT OR IGNORE INTO steps(client_id, run_id, step_name, run_at, status, created_at) "
+                "VALUES (?, ?, 'working', ?, 'pending', ?)",
+                (c["client_id"], c["run_id"], run_at, now))
+
+
 def cancel_pending(conn, client_id, run_id):
     conn.execute("UPDATE steps SET status='cancelled' "
                  "WHERE client_id=? AND run_id=? AND status='pending'",
@@ -168,27 +191,26 @@ def owner_reply_is_own_send(conn, client_id, msg_id):
         (client_id, msg_id)).fetchone() is not None
 
 
-def owner_took_over(conn, client_id, now):
-    """The account owner wrote in this chat herself -> a human took the conversation.
-    Cancel the pending drip and mark HANDOFF so the bot stops auto-sending here.
-    If the chat has NO client record, the owner INITIATED it herself — remember it as
-    a human-owned chat (terminal HANDOFF row) so the counterpart's later reply never
-    fires the first-contact trigger. The code word can still re-open it after the
-    cooldown, like any terminal client."""
+def owner_message_seen(conn, client_id, now):
+    """The account owner wrote in this chat herself.
+
+    UNKNOWN chat -> she INITIATED it: remember as a human-owned chat (terminal
+    HANDOFF row) so the counterpart's reply never fires the first-contact trigger
+    (the code word after the cooldown can still open it).
+    ACTIVE funnel -> per product decision (21.07) her messages DO NOT touch the
+    funnel — it always completes; we only journal the fact for diagnostics."""
     c = get_client(conn, client_id)
     if c is None:
         with transaction(conn):
             conn.execute(
                 "INSERT OR IGNORE INTO clients(client_id, state, run_id, created_at, updated_at) "
                 "VALUES (?, 'HANDOFF', 1, ?, ?)", (client_id, now, now))
-        return False
-    if c["state"] in config.TERMINAL_STATES:
-        return False
-    with transaction(conn):
-        cancel_pending(conn, client_id, c["run_id"])
-        conn.execute("UPDATE clients SET state='HANDOFF', version=version+1, updated_at=? "
-                     "WHERE client_id=?", (now, client_id))
-    return True
+        return "owner-chat"
+    if c["state"] not in config.TERMINAL_STATES:
+        with transaction(conn):
+            log_event(conn, "owner_message", client_id, c["run_id"], now)
+        return "journaled"
+    return "ignored"
 
 
 def handle_incoming(conn, client_id, text, now, bcid=None, msg_id=None, rng=None):
@@ -197,17 +219,9 @@ def handle_incoming(conn, client_id, text, now, bcid=None, msg_id=None, rng=None
     if get_client(conn, client_id) is not None:
         touch_incoming(conn, client_id, bcid, now)
 
-    if content.is_stop(text):
-        if get_client(conn, client_id) is None:
-            # opt-out from an UNKNOWN person must persist, otherwise their next
-            # message would fire the first-contact trigger (opt-out bypass)
-            with transaction(conn):
-                conn.execute(
-                    "INSERT OR IGNORE INTO clients(client_id, state, run_id, created_at, updated_at) "
-                    "VALUES (?, 'STOPPED', 1, ?, ?)", (client_id, now, now))
-        else:
-            _terminate(conn, client_id, "STOPPED", now)
-        return {"action": "stopped"}
+    # NB: stop words deliberately do NOT stop the funnel (product decision 21.07:
+    # «воронка всегда доходит до конца», ничего её не останавливает). The only hard
+    # stop is the client physically blocking the account (permanent send error).
 
     # Triggers: the code word (works always, incl. re-trigger after cooldown) OR the
     # very first message from an unknown person (any content, stickers/gifs included).
@@ -244,6 +258,8 @@ def handle_incoming(conn, client_id, text, now, bcid=None, msg_id=None, rng=None
             return {"action": "handoff", "client_id": client_id, "name": c["name"]}
         # topic can arrive in any message until the card locks it (incl. repeated code word)
         maybe_set_topic(conn, client_id, text, now, rng)
+        # any reply after the greeting anchors «я в работе» reactively (reply + 15 мин)
+        _anchor_working(conn, c, now)
         if intent:
             # buy-intent BEFORE the reading: internal analytics only, once per run —
             # NO operator ping, the funnel just continues (the client must get the

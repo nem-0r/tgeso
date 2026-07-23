@@ -51,10 +51,10 @@ async def test_timings():
     codeword_t = min(t for (t, d, _) in timeline if d == "IN")  # real anchor: code-word arrival
     offs = [round(e["t"] - codeword_t) for e in sent]
     check("greeting at +7:00", offs[0] == 420, str(offs))
-    check("working at +12:00", offs[2] == 720, str(offs))
-    check("intro at +27:00", offs[3] == 1620, str(offs))
-    check("photo+diagnosis at +27:00", offs[4] == 1620 and offs[5] == 1620, str(offs))
-    check("cta at +27:30", offs[6] == 1650, str(offs))
+    check("working at +22:00 (ранний ответ -> ask+15)", offs[2] == 1320, str(offs))
+    check("intro at +37:00", offs[3] == 2220, str(offs))
+    check("photo+diagnosis at +37:00", offs[4] == 2220 and offs[5] == 2220, str(offs))
+    check("cta at +37:30", offs[6] == 2250, str(offs))
 
 
 async def test_name_fallback():
@@ -63,7 +63,9 @@ async def test_name_fallback():
     transport, _ = await simulate.main(client_id=cid, seed=5, verbose=False,
                                        messages=[(0, "ТАРО")])  # never sends a name
     sent = transport.sent_steps_for(cid)
-    intro = str(sent[3]["content"])
+    check("молчун получает 8 сообщений (с нуджем)", len(sent) == 8, str(len(sent)))
+    check("нудж — настраиваемый текст напоминалки", config.NUDGE_TEXT in str(sent[2]["content"]))
+    intro = str(sent[4]["content"])
     check("no '{name}' left in intro", "{name}" not in intro)
     check("intro starts capitalised", intro[:1].isupper(), intro[:20])
 
@@ -390,7 +392,7 @@ def test_confirm_toctou():
 
 
 def test_owner_takeover():
-    print("\n== owner manual reply -> auto-pause drip (#1) + own-send echo guard ==")
+    print("\n== гадалка пишет сама: воронку НЕ трогаем (решение 21.07), только журналим ==")
     conn = dbm.connect()
     with dbm.transaction(conn):
         dbm.wipe(conn, dbm.RUNTIME_TABLES)
@@ -398,15 +400,21 @@ def test_owner_takeover():
     funnel.start_or_reset(conn, cid, "SIM", now=1000)   # active drip: greeting pending
     pend_before = conn.execute("SELECT COUNT(*) AS c FROM steps WHERE client_id=? AND status='pending'",
                                (cid,)).fetchone()["c"]
-    check("drip scheduled before takeover", pend_before >= 1, f"pending={pend_before}")
-    took = funnel.owner_took_over(conn, cid, now=1005)   # owner types in this chat herself
-    check("owner_took_over reports handled", took is True)
-    check("state HANDOFF after takeover", funnel.get_client(conn, cid)["state"] == "HANDOFF")
+    check("drip scheduled", pend_before >= 1, f"pending={pend_before}")
+    res = funnel.owner_message_seen(conn, cid, now=1005)   # owner types in this chat herself
+    check("её сообщение лишь журналится", res == "journaled", str(res))
+    check("state НЕ изменился (воронка живёт)", funnel.get_client(conn, cid)["state"] == "TRIGGERED")
     pend_after = conn.execute("SELECT COUNT(*) AS c FROM steps WHERE client_id=? AND status='pending'",
                               (cid,)).fetchone()["c"]
-    check("pending drip cancelled", pend_after == 0, f"pending={pend_after}")
-    check("no-op for her ordinary contact", funnel.owner_took_over(conn, 999999, now=1006) is False)
-    check("no-op when already terminal", funnel.owner_took_over(conn, cid, now=1007) is False)
+    check("pending шаги НЕ отменены", pend_after == pend_before, f"pending={pend_after}")
+    ev = conn.execute("SELECT COUNT(*) c FROM events WHERE client_id=? AND event='owner_message'",
+                      (cid,)).fetchone()["c"]
+    check("событие owner_message записано", ev == 1, str(ev))
+    # незнакомый чат, который она начала сама -> помечен как её (HANDOFF)
+    res = funnel.owner_message_seen(conn, 999999, now=1006)
+    check("её новый чат помечен owner-chat", res == "owner-chat"
+          and funnel.get_client(conn, 999999)["state"] == "HANDOFF", str(res))
+    check("terminal чат -> ignored", funnel.owner_message_seen(conn, 999999, now=1007) == "ignored")
     # echo guard: a message id the bot itself sent must NOT be treated as a manual reply
     conn.execute("INSERT INTO sent_log(client_id, run_id, step_name, tg_message_id, sent_at) "
                  "VALUES (?,?,?,?,?)", (cid, 1, "greeting", 55501, 1000))
@@ -529,10 +537,11 @@ async def test_first_contact():
     transport, _ = await simulate.main(client_id=970002, seed=62, verbose=False,
                                        messages=[(0, "")])
     c = conn.execute("SELECT state, name, topic FROM clients WHERE client_id=?", (970002,)).fetchone()
-    check("стикер (пустой текст) запустил воронку, 7/7", len(transport.sent_steps_for(970002)) == 7)
+    check("стикер (пустой текст) запустил воронку, 8 сообщений с нуджем",
+          len(transport.sent_steps_for(970002)) == 8, str(len(transport.sent_steps_for(970002))))
     check("имя None, тема назначена fallback'ом", c["name"] is None and c["topic"] in content.TOPICS,
           f"{c['name']!r}/{c['topic']!r}")
-    intro = str(transport.sent_steps_for(970002)[3]["content"])
+    intro = str(transport.sent_steps_for(970002)[4]["content"])
     check("интро без обращения и без {name}", "{name}" not in intro and intro[:1].isupper())
 
     # (3) первое сообщение с именем+темой сразу: всё захвачено из ОДНОГО сообщения
@@ -548,27 +557,21 @@ async def test_first_contact():
     transport, _ = await simulate.main(client_id=970004, seed=64, verbose=False,
                                        messages=[(0, "сколько стоит расклад?")])
     alerts = [e for e in transport.events if e["kind"] == "alert"]
-    check("интент в первом сообщении: воронка живёт, 7/7",
-          len(transport.sent_steps_for(970004)) == 7)
+    check("интент в первом сообщении: воронка живёт, 8 сообщений (молчун -> нудж)",
+          len(transport.sent_steps_for(970004)) == 8, str(len(transport.sent_steps_for(970004))))
     check("НОЛЬ пингов до конца пути", len(alerts) == 0, str(alerts))
     ev = conn.execute("SELECT COUNT(*) c FROM events WHERE client_id=? AND event='early_lead'",
                       (970004,)).fetchone()["c"]
     check("внутреннее событие early_lead записано", ev == 1, str(ev))
 
-    # (5) первое сообщение «стоп» -> опт-аут ПЕРСИСТИТСЯ (обход через след. сообщение невозможен)
+    # (5) «стоп» первым сообщением: по решению 21.07 НИЧТО не останавливает воронку —
+    # это обычное первое сообщение незнакомца, воронка запускается
     with dbm.transaction(conn):
         dbm.wipe(conn, dbm.RUNTIME_TABLES)
     r = funnel.handle_incoming(conn, 970005, "стоп", 1000, bcid="SIM")
     c = funnel.get_client(conn, 970005)
-    check("«стоп» первым сообщением -> stopped + запись STOPPED", r["action"] == "stopped"
-          and c is not None and c["state"] == "STOPPED", str(r))
-    r = funnel.handle_incoming(conn, 970005, "привет", 1005, bcid="SIM")
-    check("следующее сообщение НЕ запускает воронку (opt-out bypass закрыт)",
-          r["action"] == "ignored", str(r))
-    r = funnel.handle_incoming(conn, 970005, "ТАРО", 1010, bcid="SIM")
-    check("и ТАРО сразу после «стоп» тоже игнорируется (кулдаун)", r["action"] == "ignored", str(r))
-    r = funnel.handle_incoming(conn, 970005, "ТАРО", 1000 + config.RETRIGGER_COOLDOWN + 5, bcid="SIM")
-    check("ТАРО спустя кулдаун -> явный повторный опт-ин работает", r["action"] == "re-triggered", str(r))
+    check("«стоп» первым сообщением -> воронка запускается (политика «всегда до конца»)",
+          r["action"] == "triggered" and c is not None and c["state"] == "TRIGGERED", str(r))
 
     # (6) kill-switch: TAROT_FIRST_CONTACT=0 -> старое поведение (только ТАРО)
     config.FIRST_CONTACT_TRIGGER = False
@@ -600,7 +603,8 @@ async def test_first_contact():
 
     # (8) чат, начатый САМОЙ гадалкой -> защищён от авто-воронки
     cid = 970009
-    check("гадалка пишет первой: no-op", funnel.owner_took_over(conn, cid, now=3000) is False)
+    check("гадалка пишет первой: чат помечен её",
+          funnel.owner_message_seen(conn, cid, now=3000) == "owner-chat")
     c = funnel.get_client(conn, cid)
     check("чат помечен как её (HANDOFF)", c is not None and c["state"] == "HANDOFF",
           str(c and c["state"]))
@@ -673,11 +677,89 @@ async def test_early_lead():
                       (cid,)).fetchone()["c"]
     check("hot_lead записан", hl == 1)
 
-    # (5) «стоп» — единственный авто-стоп — работает как раньше
+    # (5) «стоп» НЕ останавливает (решение 21.07: воронка всегда доходит до конца)
     transport, _ = await simulate.main(client_id=920005, seed=35, verbose=False,
                                        messages=[(0, "ТАРО"), (30, "стоп")])
     c = conn.execute("SELECT state FROM clients WHERE client_id=?", (920005,)).fetchone()
-    check("«стоп» по-прежнему останавливает", c["state"] == "STOPPED", c["state"])
+    check("«стоп» не останавливает — воронка дошла до CTA", c["state"] == "CTA_SENT", c["state"])
+    check("…и все 7 сообщений доставлены", len(transport.sent_steps_for(920005)) == 7)
+    conn.close()
+
+
+async def test_reactive_flow():
+    print("\n== реактивный поток: «в работе» = ответ+15м; нудж 30м; всегда до конца ==")
+    conn = dbm.connect()
+
+    def offs_of(transport, cid, t0):
+        return [round(e["t"] - t0) for e in transport.sent_steps_for(cid)]
+
+    # (a) ответ ПОСЛЕ ask: «в работе» ровно через 15 мин после ответа
+    tr, tl = await simulate.main(client_id=940001, seed=71, verbose=False,
+                                 messages=[(0, "ТАРО"), (9 * 60, "Игорь, про работу")])
+    t0 = min(t for (t, d, _) in tl if d == "IN")
+    o = offs_of(tr, 940001, t0)
+    check("(a) working = ответ(9:00)+15 = 24:00", o[2] == 24 * 60, str(o))
+    check("(a) reading = 39:00, cta = 39:30", o[3] == 39 * 60 and o[6] == 39 * 60 + 30, str(o))
+    check("(a) нуджа нет (клиент ответил): 7 сообщений", len(o) == 7, str(len(o)))
+
+    # (b) полный молчун: нудж на ask+30, working ещё через 30, до конца без имени
+    tr, tl = await simulate.main(client_id=940002, seed=72, verbose=False,
+                                 messages=[(0, "ТАРО")])
+    t0 = min(t for (t, d, _) in tl if d == "IN")
+    o = offs_of(tr, 940002, t0)
+    check("(b) нудж на 37:00 (ask 7:00 + 30)", o[2] == 37 * 60, str(o))
+    check("(b) working на 67:00, reading 82:00, cta 82:30",
+          o[3] == 67 * 60 and o[4] == 82 * 60 and o[7] == 82 * 60 + 30, str(o))
+    check("(b) 8 сообщений, дошло до конца", len(o) == 8, str(len(o)))
+    st = conn.execute("SELECT state FROM clients WHERE client_id=?", (940002,)).fetchone()["state"]
+    check("(b) state CTA_SENT", st == "CTA_SENT", st)
+
+    # (c) ответ ПОСЛЕ нуджа: working переносится раньше (MIN(fallback, ответ+15))
+    tr, tl = await simulate.main(client_id=940003, seed=73, verbose=False,
+                                 messages=[(0, "ТАРО"), (40 * 60, "Оля")])
+    t0 = min(t for (t, d, _) in tl if d == "IN")
+    o = offs_of(tr, 940003, t0)
+    check("(c) нудж ушёл в 37:00", o[2] == 37 * 60, str(o))
+    check("(c) working = MIN(67:00, 40+15=55:00) = 55:00", o[3] == 55 * 60, str(o))
+    nm = conn.execute("SELECT name FROM clients WHERE client_id=?", (940003,)).fetchone()["name"]
+    check("(c) имя Оля поймано после нуджа", nm == "Оля", repr(nm))
+
+    # (d) имя и вопрос ОТДЕЛЬНЫМИ сообщениями: якорь — ПЕРВЫЙ ответ, тема со второго
+    tr, tl = await simulate.main(client_id=940004, seed=74, verbose=False,
+                                 messages=[(0, "ТАРО"), (8 * 60, "Марина"),
+                                           (12 * 60, "что будет с деньгами?")])
+    t0 = min(t for (t, d, _) in tl if d == "IN")
+    o = offs_of(tr, 940004, t0)
+    check("(d) working = первый ответ(8:00)+15 = 23:00 (второе сообщение НЕ сдвигает)",
+          o[2] == 23 * 60, str(o))
+    c = conn.execute("SELECT name, topic FROM clients WHERE client_id=?", (940004,)).fetchone()
+    check("(d) имя Марина + тема Финансы из двух сообщений",
+          c["name"] == "Марина" and c["topic"] == content.TOPIC_MONEY, f"{c['name']}/{c['topic']}")
+    check("(d) 7 сообщений (нудж отменён)", len(o) == 7, str(len(o)))
+
+    # (e) гадалка вмешалась посреди воронки -> воронка ИДЁТ ДО КОНЦА
+    with dbm.transaction(conn):
+        dbm.wipe(conn, dbm.RUNTIME_TABLES)
+    clock = VirtualClock(1_900_000_000)
+    tr2 = SimulatedTransport(clock, verbose=False)
+    funnel.handle_incoming(conn, 940005, "ТАРО", clock.now(), bcid="SIM")
+    funnel.handle_incoming(conn, 940005, "Аня, про любовь", clock.now() + 60, bcid="SIM")
+    funnel.owner_message_seen(conn, 940005, clock.now() + 120)   # она написала сама
+    t = 0
+    while True:
+        nxt = scheduler.next_pending_run_at(conn)
+        if nxt is None:
+            break
+        clock.set(max(nxt, clock.now()))
+        await scheduler.tick(conn, tr2, clock.now())
+        t += 1
+        if t > 1000:
+            break
+    check("(e) вмешательство гадалки не остановило: 7/7 доставлено",
+          len(tr2.sent_steps_for(940005)) == 7, str(len(tr2.sent_steps_for(940005))))
+    ev = conn.execute("SELECT COUNT(*) c FROM events WHERE client_id=? AND event='owner_message'",
+                      (940005,)).fetchone()["c"]
+    check("(e) её сообщение зажурналено", ev == 1, str(ev))
     conn.close()
 
 
@@ -721,6 +803,7 @@ async def main():
     await test_topic_flow()
     await test_early_lead()
     await test_first_contact()
+    await test_reactive_flow()
     test_ops_safety()
     await test_idempotency()
     print("\n" + "=" * 50)

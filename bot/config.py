@@ -35,16 +35,29 @@ REPORT_HOUR = int(os.environ.get("REPORT_HOUR", "10"))               # morning h
 REPORT_TZ_OFFSET_HOURS = int(os.environ.get("REPORT_TZ_OFFSET", "3"))  # Moscow = UTC+3, no DST
 REPORT_BUTTON = "📊 Отчёт за сегодня"                                  # on-demand report button label
 
-# --- funnel timing (seconds) — STRICTLY per воронка, each relative to previous step ---
-# (step_name, delay_from_previous_step_seconds, kind)
+# --- funnel timing (seconds) ---
+# «Я в работе» is REACTIVE: it goes out WORKING_AFTER_REPLY after the client's FIRST
+# reply to the ask (they may send name and question as separate messages — the pause
+# absorbs that). If the client stays silent, a nudge goes out NUDGE_AFTER_ASK later;
+# still silent -> the funnel continues WITHOUT the name after WORKING_AFTER_NUDGE
+# (the funnel ALWAYS completes). Everything after «working» is strict per the script.
+WORKING_AFTER_REPLY = 15 * 60    # ответ клиента -> «я в работе» через 15 мин
+NUDGE_AFTER_ASK = 30 * 60        # молчание после вопроса об имени -> напоминалка
+WORKING_AFTER_NUDGE = 30 * 60    # молчание и после напоминалки -> продолжаем без имени
+NUDGE_TEXT = os.environ.get("TAROT_NUDGE_TEXT", "Жду тебя. Как будешь готова — напиши 🌙")
+
+# (step_name, fallback_delay_from_previous_step_seconds, kind)
+# NB: 'working' is normally scheduled by the client's reply (see funnel), the chain
+# delay below is the SILENT-path fallback (after the nudge).
 STEP_CHAIN = [
-    ("greeting",  7 * 60, "text"),   # +7 мин после кодового слова
-    ("ask",            0, "text"),   # сразу после greeting
-    ("working",   5 * 60, "text"),   # +5 мин
-    ("intro",    15 * 60, "text"),   # +15 мин
-    ("image",          0, "photo"),  # сразу: карта
-    ("diagnosis",      0, "text"),   # сразу: разбор (текст ПОД картинкой)
-    ("cta",           30, "text"),   # +30 сек
+    ("greeting",  7 * 60, "text"),         # +7 мин после кодового слова / первого контакта
+    ("ask",            0, "text"),         # сразу после greeting
+    ("nudge", NUDGE_AFTER_ASK, "text"),    # только если клиент молчит
+    ("working", WORKING_AFTER_NUDGE, "text"),
+    ("intro",    15 * 60, "text"),         # +15 мин («она гадает»)
+    ("image",          0, "photo"),        # сразу: карта
+    ("diagnosis",      0, "text"),         # сразу: разбор (текст ПОД картинкой)
+    ("cta",           30, "text"),         # +30 сек
 ]
 STEP_ORDER = [s[0] for s in STEP_CHAIN]
 STEP_DELAY = {s[0]: s[1] for s in STEP_CHAIN}
@@ -55,6 +68,7 @@ FIRST_STEP = STEP_ORDER[0]
 STATE_AFTER = {
     "greeting": "GREETED",
     "ask": "ASKED",
+    "nudge": "ASKED",    # напоминалка не двигает состояние — мы всё ещё ждём ответа
     "working": "WORKING",
     "intro": "DIAGNOSING",
     "image": "DIAGNOSING",
@@ -63,7 +77,7 @@ STATE_AFTER = {
 }
 
 # staleness TTL (seconds): a due step older than this is skipped instead of sent late
-STEP_TTL = {"greeting": 15 * 60, "ask": 10 * 60, "working": 20 * 60,
+STEP_TTL = {"greeting": 15 * 60, "ask": 10 * 60, "nudge": 30 * 60, "working": 30 * 60,
             "intro": 30 * 60, "image": 30 * 60, "diagnosis": 30 * 60, "cta": 5 * 60}
 
 # strict mode: exact timings (as requested). Enable jitter later for anti-ban.

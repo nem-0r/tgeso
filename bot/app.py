@@ -81,10 +81,11 @@ async def _run_live():
         now = int(time.time())
         owner_id = await _owner_of(msg.business_connection_id)
         if owner_id is not None and msg.from_user.id == owner_id:
-            # #1: the owner typed in a client chat herself -> a human took over; pause our
-            # drip there. Skip the bot's OWN on-behalf sends (echoed back) via sent_log id.
+            # the owner typed in a chat herself: journal it / mark her own chats.
+            # Per product decision her messages never touch a running funnel.
+            # Skip the bot's OWN on-behalf sends (echoed back) via sent_log id.
             if not funnel.owner_reply_is_own_send(conn, msg.chat.id, msg.message_id):
-                funnel.owner_took_over(conn, msg.chat.id, now)
+                funnel.owner_message_seen(conn, msg.chat.id, now)
             return
         text = msg.text or msg.caption or ""
         res = funnel.handle_incoming(

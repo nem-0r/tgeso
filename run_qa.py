@@ -132,43 +132,47 @@ async def t_happy_multitopic():
 
 
 async def t_no_name():
-    print("\n== no-name -> intro fallback ==")
+    print("\n== молчун: нудж + воронка всё равно до конца, интро без имени ==")
     h = H(seed=2)
     h.send(99, "ТАРО")
     await h.drain()
-    intro = str(h.sent(99)[3]["content"])
+    sent = h.sent(99)
+    check("8 messages incl. nudge", len(sent) == 8, str(len(sent)))
+    check("nudge text is the reminder", config.NUDGE_TEXT in str(sent[2]["content"]))
+    intro = str(sent[4]["content"])
     check("no {name} placeholder leaks", "{name}" not in intro)
-    check("7 messages still sent", len(h.sent(99)) == 7)
+    check("state CTA_SENT (дошла до конца)", h.state(99) == "CTA_SENT")
     h.close()
 
 
 async def t_stop_variants():
-    print("\n== stop word variants terminate ==")
+    print("\n== стоп-слова НЕ останавливают воронку (решение 21.07: всегда до конца) ==")
     for i, word in enumerate(["Стоп!", "стоп пожалуйста", "не пиши мне больше"]):
         h = H(seed=3 + i)
         cid = 200 + i
         h.send(cid, "ТАРО")
         h.send(cid, word, off=5)
-        check(f"stop via '{word}'", h.state(cid) == "STOPPED")
-        check(f"no pending after stop '{word}'", h.pending(cid) == 0)
+        check(f"'{word}' не стопит (state не STOPPED)", h.state(cid) != "STOPPED", h.state(cid))
         await h.drain()
-        check(f"nothing sent after stop '{word}'", len(h.sent(cid)) == 0)
+        check(f"воронка дошла до конца после '{word}'", len(h.sent(cid)) == 7
+              and h.state(cid) == "CTA_SENT", f"{len(h.sent(cid))}/{h.state(cid)}")
         h.close()
 
 
 async def t_stop_midfunnel():
-    print("\n== stop AFTER greeting cancels the rest ==")
+    print("\n== «стоп» после приветствия: воронка всё равно продолжается ==")
     h = H(seed=9)
     cid = 300
     h.send(cid, "ТАРО")
-    # let greeting+ask fire (advance to first due, tick once)
     h.at(8 * 60)
     await scheduler.tick(h.conn, h.tr, h.clock.now(), h.rng)
+    await scheduler.tick(h.conn, h.tr, h.clock.now(), h.rng)   # ask уходит следующим тиком
     n_after_greet = len(h.sent(cid))
+    check("greeting+ask ушли", n_after_greet == 2, str(n_after_greet))
     h.send(cid, "стоп", off=8 * 60 + 5)
     await h.drain()
-    check("stopped mid-funnel", h.state(cid) == "STOPPED")
-    check("no further messages after stop", len(h.sent(cid)) == n_after_greet)
+    check("не остановилась (state CTA_SENT)", h.state(cid) == "CTA_SENT", h.state(cid))
+    check("все 7 сообщений доставлены", len(h.sent(cid)) == 7, str(len(h.sent(cid))))
     h.close()
 
 
@@ -251,10 +255,10 @@ async def t_garbage_input():
     h = H(seed=15)
     h.send(800, "ТАРО")
     h.send(800, "😀😀😀", off=10)          # emoji only -> no name
-    h.send(801, "ТАРО")
-    h.send(801, "П", off=10)               # 1 char -> not a valid name
-    h.send(802, "ТАРО")
-    h.send(802, "Даша " + "очень " * 2000, off=10)  # very long
+    h.send(801, "ТАРО", off=20)
+    h.send(801, "П", off=30)               # 1 char -> not a valid name
+    h.send(802, "ТАРО", off=40)
+    h.send(802, "Даша " + "очень " * 2000, off=50)  # very long
     await h.drain()
     check("emoji-only -> no vocative", "{name}" not in str(h.sent(800)[3]["content"]))
     check("long msg still yields a name (Даша)", "Даша" in str(h.sent(802)[3]["content"]))

@@ -2,7 +2,7 @@
 intro rendering, and per-step message building."""
 import re
 
-from . import config
+from . import config, names
 
 # Canonical 22 Major Arcana in the exact order they appear in the funnel file.
 CANON = [
@@ -289,16 +289,25 @@ _NAME_RE = re.compile(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]{1,19}$")
 _ALL_TOPIC_TOKENS = frozenset().union(*_TOPIC_WORDS.values())
 
 
-def _valid_name(tok: str, allow_topic_word=False) -> bool:
-    """allow_topic_word: only the explicit «меня зовут X» marker may accept a name that
-    doubles as a topic word (a real person called Любовь); everywhere else a topic word
-    is a topic answer («Деньги», «любовь и деньги»), never a name."""
+def _in_dictionary(tok: str) -> bool:
+    """Token is a known given name (checked per-part for doubles like Анна-Мария)."""
+    parts = norm(tok).split("-")
+    return bool(parts) and all(p in names.NAMES for p in parts if p)
+
+
+def _valid_name(tok: str, mode: str = "dict") -> bool:
+    """mode='explicit': after «меня зовут X» accept ANY name-shaped token — the client
+    literally states their name, so rare/foreign names are kept. mode='dict': everywhere
+    else the token must be in the names ALLOWLIST (bot/names.py) — closed-world matching,
+    so arbitrary words («Стоимость», «Очень», «Здрасьте») can never become a name."""
     if not _NAME_RE.match(tok) or tok.lower() in _NON_NAME \
             or tok.lower() == config.CODE_WORD.lower():
         return False
-    if not allow_topic_word and norm(tok) in _ALL_TOPIC_TOKENS:
+    if mode == "explicit":
+        return True
+    if norm(tok) in _ALL_TOPIC_TOKENS:   # «любовь и деньги» is a topic answer, not Любовь
         return False
-    return True
+    return _in_dictionary(tok)
 
 
 def _cap(tok: str) -> str:  # capitalise each hyphen-separated part
@@ -315,11 +324,11 @@ def extract_name(text: str):
     low = [t.lower() for t in toks]
     for i, t in enumerate(low):
         if t in ("зовут", "звать"):        # name may follow OR precede ("меня Маша зовут")
-            for j in (i + 1, i - 1):       # explicit marker -> even Любовь/Роман are names
-                if 0 <= j < len(toks) and _valid_name(toks[j], allow_topic_word=True):
+            for j in (i + 1, i - 1):       # explicit marker -> ANY name-shaped token
+                if 0 <= j < len(toks) and _valid_name(toks[j], mode="explicit"):
                     return _cap(toks[j])
         elif t in ("я", "это") and i + 1 < len(toks) and _valid_name(toks[i + 1]):
-            return _cap(toks[i + 1])
-    if toks and _valid_name(toks[0]):      # otherwise the first token, if name-like
+            return _cap(toks[i + 1])       # «я Оля» -> dictionary-checked
+    if toks and _valid_name(toks[0]):      # first token: dictionary-checked
         return _cap(toks[0])
     return None

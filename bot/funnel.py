@@ -6,9 +6,10 @@ handle_incoming() classifies an inbound message and mutates state:
                the drip too (config.FIRST_CONTACT_TRIGGER; re-trigger stays
                code-word-only; owner-initiated chats are protected)
   stop word  -> STOPPED + cancel pending (client opt-out — the only auto-stop)
-  buy intent BEFORE the reading -> 'early_lead': ping the operator once, funnel
-               CONTINUES (client still gets the card+diagnosis)
+  buy intent BEFORE the reading -> internal 'early_lead' event only (NO ping), the
+               funnel continues — the client still gets the card+diagnosis
   buy intent AFTER the reading / any reply after CTA -> HANDOFF + cancel pending
+               (the operator's ONE and only alert: the 🔥 hot lead)
   otherwise  -> capture the client's name+question (once), for the r6 intro,
                 and detect their TOPIC (любовь/финансы/будущее) to pick the card
                 from the right category (per-topic bag, even-random within it).
@@ -222,17 +223,16 @@ def handle_incoming(conn, client_id, text, now, bcid=None, msg_id=None, rng=None
             if first_contact:
                 with transaction(conn):
                     log_event(conn, "first_contact", client_id, c2["run_id"], now)
-            # the trigger message itself may already carry the topic/name/intent
-            # («ТАРО про любовь», «Привет, я Аня, сколько стоит расклад?»)
+            # the trigger message itself may already carry the topic/name
+            # («ТАРО про любовь», «Привет, я Аня, что с деньгами?»)
             maybe_set_topic(conn, client_id, text, now, rng)
             capture_answer(conn, client_id, text, now)
-            res = {"action": action, "client_id": client_id}
             if content.has_intent(text):
+                # internal analytics only — NO operator ping before the reading;
+                # the single alert is the hot-lead hand-off after the reading/CTA
                 with transaction(conn):
                     log_event(conn, "early_lead", client_id, c2["run_id"], now)
-                res["early_lead"] = True
-                res["name"] = get_client(conn, client_id)["name"]
-            return res
+            return {"action": action, "client_id": client_id}
 
     c = get_client(conn, client_id)
     if c and c["state"] not in config.TERMINAL_STATES and c["state"] != "NEW":
@@ -245,21 +245,15 @@ def handle_incoming(conn, client_id, text, now, bcid=None, msg_id=None, rng=None
         # topic can arrive in any message until the card locks it (incl. repeated code word)
         maybe_set_topic(conn, client_id, text, now, rng)
         if intent:
-            # EARLY interest (price asked before the reading): NEVER stop the funnel —
-            # the client must still receive the card+diagnosis. Ping the operator once
-            # per run; the message still feeds name/topic capture as usual.
+            # buy-intent BEFORE the reading: internal analytics only, once per run —
+            # NO operator ping, the funnel just continues (the client must get the
+            # reading; the single alert is the post-reading/post-CTA hand-off)
             first = conn.execute(
                 "SELECT 1 FROM events WHERE client_id=? AND run_id=? AND event='early_lead'",
                 (client_id, c["run_id"])).fetchone() is None
             if first:
                 with transaction(conn):
                     log_event(conn, "early_lead", client_id, c["run_id"], now)
-            if not is_cw:
-                capture_answer(conn, client_id, text, now)
-            if first:
-                c2 = get_client(conn, client_id)
-                return {"action": "early_lead", "client_id": client_id, "name": c2["name"]}
-            return {"action": "noted"}
         if is_cw:
             return {"action": "ignored"}   # active client just repeated the code word
         return {"action": capture_answer(conn, client_id, text, now)}

@@ -173,12 +173,12 @@ async def t_stop_midfunnel():
 
 
 async def t_intent_handoff():
-    print("\n== buy-intent BEFORE the reading -> early_lead ping, funnel CONTINUES ==")
+    print("\n== buy-intent BEFORE the reading -> funnel CONTINUES silently (no ping) ==")
     h = H(seed=10)
     cid = 400
     h.send(cid, "ТАРО")
     r = h.send(cid, "а сколько стоит расклад? хочу купить", off=30)
-    check("early intent -> early_lead action (not handoff)", r["action"] == "early_lead", str(r))
+    check("early intent -> обычный captured (не handoff, не пинг)", r["action"] == "captured", str(r))
     check("state NOT terminal (funnel alive)", h.state(cid) not in
           ("HANDOFF", "STOPPED", "COMPLETED", "BLOCKED", "ABANDONED"), h.state(cid))
     check("pending steps NOT cancelled", h.pending(cid) >= 1, str(h.pending(cid)))
@@ -516,22 +516,22 @@ async def t_all_card_image_consistency():
 
 
 async def t_operator_alert():
-    print("\n== operator alerts: early ping mid-funnel, hot-lead after the reading ==")
+    print("\n== operator alerts: the ONLY alert is the final hot lead ==")
     h = H(seed=26)
     cid = 1500
     h.send(cid, "ТАРО")
-    r = h.send(cid, "хочу оплатить", off=20)   # BEFORE the reading -> early ping, funnel alive
+    r = h.send(cid, "хочу оплатить", off=20)   # BEFORE the reading -> NO ping, funnel alive
     if r["action"] in ("handoff", "early_lead"):
         await h.tr.notify_operator(f"lead {cid}")
-    check("early intent -> early_lead (funnel alive)", r["action"] == "early_lead", str(r))
-    check("early operator ping recorded", len(h.tr.alerts) == 1)
+    check("early intent -> no ping-worthy action", r["action"] == "captured", str(r))
+    check("zero early alerts", len(h.tr.alerts) == 0)
     await h.drain()
     check("client got the full funnel anyway", len(h.sent(cid)) == 7, str(len(h.sent(cid))))
-    r2 = h.send(cid, "готова оплатить", off=60 * 60)   # AFTER the reading -> full handoff
+    r2 = h.send(cid, "готова оплатить", off=60 * 60)   # AFTER the reading -> the ONE alert
     if r2["action"] == "handoff":
         await h.tr.notify_operator(f"hot {cid}")
     check("post-reading intent -> handoff", r2["action"] == "handoff", str(r2))
-    check("hot-lead alert recorded", len(h.tr.alerts) == 2)
+    check("exactly ONE alert total (the hot lead)", len(h.tr.alerts) == 1)
     h.close()
 
 

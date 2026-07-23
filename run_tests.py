@@ -543,14 +543,17 @@ async def test_first_contact():
     check("тема Любовь из первого сообщения", c["topic"] == content.TOPIC_LOVE, repr(c["topic"]))
     check("7/7 доставлено", len(transport.sent_steps_for(970003)) == 7)
 
-    # (4) первое сообщение «сколько стоит?» -> воронка + ранний пинг гадалке
+    # (4) первое сообщение «сколько стоит?» -> воронка идёт, НИКАКИХ пингов (по решению
+    # пользователя: единственный алерт — финальный горячий лид), событие только в журнал
     transport, _ = await simulate.main(client_id=970004, seed=64, verbose=False,
                                        messages=[(0, "сколько стоит расклад?")])
     alerts = [e for e in transport.events if e["kind"] == "alert"]
     check("интент в первом сообщении: воронка живёт, 7/7",
           len(transport.sent_steps_for(970004)) == 7)
-    check("ровно один ранний пинг", len(alerts) == 1 and "Ранний интерес" in str(alerts[0]["content"]),
-          str(alerts))
+    check("НОЛЬ пингов до конца пути", len(alerts) == 0, str(alerts))
+    ev = conn.execute("SELECT COUNT(*) c FROM events WHERE client_id=? AND event='early_lead'",
+                      (970004,)).fetchone()["c"]
+    check("внутреннее событие early_lead записано", ev == 1, str(ev))
 
     # (5) первое сообщение «стоп» -> опт-аут ПЕРСИСТИТСЯ (обход через след. сообщение невозможен)
     with dbm.transaction(conn):
@@ -623,11 +626,12 @@ async def test_early_lead():
     check("клиент ПОЛУЧИЛ все 7 сообщений (раньше: 3 и обрыв)", len(sent) == 7, str(len(sent)))
     check("state=CTA_SENT (воронка дожила до конца)", c["state"] == "CTA_SENT", c["state"])
     alerts = [e for e in transport.events if e["kind"] == "alert"]
-    check("гадалке ушёл РОВНО ОДИН ранний пинг", len(alerts) == 1
-          and "Ранний интерес" in str(alerts[0]["content"]), str(alerts))
+    check("пингов гадалке НЕТ (единственный алерт — финальный горячий лид)",
+          len(alerts) == 0, str(alerts))
     ev = [r["event"] for r in conn.execute(
         "SELECT event FROM events WHERE client_id=? AND event IN ('early_lead','hot_lead')", (920001,))]
-    check("событие early_lead one-shot, hot_lead НЕ создано", ev == ["early_lead"], str(ev))
+    check("событие early_lead one-shot (только журнал), hot_lead НЕ создано",
+          ev == ["early_lead"], str(ev))
 
     # (2) интент в сообщении с именем и темой: всё захватывается, воронка живёт
     transport, _ = await simulate.main(client_id=920002, seed=32, verbose=False,
@@ -637,12 +641,15 @@ async def test_early_lead():
     check("тема Финансы захвачена", c["topic"] == content.TOPIC_MONEY, repr(c["topic"]))
     check("7/7 доставлено", len(transport.sent_steps_for(920002)) == 7)
 
-    # (3) повторный интент в том же прогоне -> без второго пинга
+    # (3) повторные интент-сообщения -> по-прежнему ноль пингов, событие в журнале одно
     transport, _ = await simulate.main(client_id=920003, seed=33, verbose=False,
                                        messages=[(0, "ТАРО"), (30, "сколько стоит?"),
                                                  (60, "ну так цена какая")])
     alerts = [e for e in transport.events if e["kind"] == "alert"]
-    check("два интент-сообщения -> один пинг", len(alerts) == 1, str(len(alerts)))
+    check("два интент-сообщения -> ноль пингов", len(alerts) == 0, str(len(alerts)))
+    ev = conn.execute("SELECT COUNT(*) c FROM events WHERE client_id=? AND event='early_lead'",
+                      (920003,)).fetchone()["c"]
+    check("…и одно внутреннее событие (без дублей)", ev == 1, str(ev))
     check("7/7 доставлено", len(transport.sent_steps_for(920003)) == 7)
 
     # (4) интент ПОСЛЕ разбора -> полный handoff (отмена CTA), как раньше
